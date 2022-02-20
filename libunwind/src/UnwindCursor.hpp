@@ -74,6 +74,16 @@ extern "C" _Unwind_Reason_Code __libunwind_seh_personality(
 #include "RWMutex.hpp"
 #include "Unwind-EHABI.h"
 
+#if defined(_LIBUNWIND_USE_BTREE)
+#include "BTreeLookup.hpp"
+
+static libunwind::BTreeLookup TheBTreeLookup;
+
+extern "C" {
+_LIBUNWIND_EXPORT void __libunwind_btreelookup_sync() { TheBTreeLookup.sync(); }
+}
+#endif
+
 namespace libunwind {
 
 #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
@@ -1949,6 +1959,20 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
   // address.
   if (isReturnAddress)
     --pc;
+
+#if defined(_LIBUNWIND_USE_BTREE)
+  // Use the btree cache if supported
+  if (pint_t fde = TheBTreeLookup.findFDE(pc)) {
+    typename CFI_Parser<A>::FDE_Info fdeInfo;
+    typename CFI_Parser<A>::CIE_Info cieInfo;
+    if (!CFI_Parser<A>::decodeFDE(_addressSpace, fde, &fdeInfo, &cieInfo)) {
+      // Double check this FDE is for a function that includes the pc.
+      if ((fdeInfo.pcStart <= pc) && (pc < fdeInfo.pcEnd))
+        if (getInfoFromFdeCie(fdeInfo, cieInfo, pc, 0))
+          return;
+    }
+  }
+#endif
 
   // Ask address space object to find unwind sections for this pc.
   UnwindInfoSections sects;

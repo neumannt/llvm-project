@@ -278,6 +278,10 @@ void __unw_add_dynamic_fde(unw_word_t fde) {
                            LocalAddressSpace::sThisAddressSpace,
                           (LocalAddressSpace::pint_t) fde, &fdeInfo, &cieInfo);
   if (message == NULL) {
+#if defined(_LIBUNWIND_USE_BTREE)
+    if (TheBTreeLookup.insertFrame(fdeInfo.pcStart, fdeInfo.pcEnd - fdeInfo.pcStart, fdeInfo.fdeStart))
+      return;
+#endif
     // dynamically registered FDEs don't have a mach_header group they are in.
     // Use fde as mh_group
     unw_word_t mh_group = fdeInfo.fdeStart;
@@ -291,6 +295,17 @@ void __unw_add_dynamic_fde(unw_word_t fde) {
 
 /// IPI: for __deregister_frame()
 void __unw_remove_dynamic_fde(unw_word_t fde) {
+#if defined(_LIBUNWIND_USE_BTREE)
+  CFI_Parser<LocalAddressSpace>::FDE_Info fdeInfo;
+  CFI_Parser<LocalAddressSpace>::CIE_Info cieInfo;
+  const char *message = CFI_Parser<LocalAddressSpace>::decodeFDE(
+                           LocalAddressSpace::sThisAddressSpace,
+                          (LocalAddressSpace::pint_t) fde, &fdeInfo, &cieInfo);
+  if (message == NULL) {
+    if (TheBTreeLookup.removeFrame(fdeInfo.pcStart))
+      return;
+  }
+#endif
   // fde is own mh_group
   DwarfFDECache<LocalAddressSpace>::removeAllIn((LocalAddressSpace::pint_t)fde);
 }
