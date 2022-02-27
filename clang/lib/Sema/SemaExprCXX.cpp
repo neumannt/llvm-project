@@ -6492,6 +6492,8 @@ mergeExceptionSpecs(Sema &S, FunctionProtoType::ExceptionSpecInfo ESI1,
   if (EST2 == EST_MSAny) return ESI2;
   if (EST1 == EST_NoexceptFalse) return ESI1;
   if (EST2 == EST_NoexceptFalse) return ESI2;
+  if (EST1 == EST_BasicThrows) return ESI1;
+  if (EST2 == EST_BasicThrows) return ESI2;
 
   // If either of them is non-throwing, the result is the other.
   if (EST1 == EST_NoThrow) return ESI2;
@@ -6524,6 +6526,7 @@ mergeExceptionSpecs(Sema &S, FunctionProtoType::ExceptionSpecInfo ESI1,
   case EST_DependentNoexcept:
   case EST_NoexceptFalse:
   case EST_NoexceptTrue:
+  case EST_BasicThrows:
   case EST_NoThrow:
     llvm_unreachable("handled above");
 

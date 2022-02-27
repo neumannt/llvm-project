@@ -439,6 +439,10 @@ bool Sema::CheckEquivalentExceptionSpec(FunctionDecl *Old, FunctionDecl *New) {
     OS << "noexcept";
     break;
 
+  case EST_BasicThrows:
+    OS << "throws";
+    break;
+
   case EST_DependentNoexcept:
   case EST_NoexceptFalse:
   case EST_NoexceptTrue:

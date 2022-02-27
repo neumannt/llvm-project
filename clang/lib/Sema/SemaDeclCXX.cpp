@@ -204,6 +204,11 @@ Sema::ImplicitExceptionSpecification::CalledDecl(SourceLocation CallLoc,
   case EST_NoexceptTrue:
   case EST_NoThrow:
     return;
+  case EST_BasicThrows:
+    ClearExceptions();
+    ComputedEST = EST;
+    return;
+  // FIXME: If the call to this decl is using any of its default arguments, we
   // If we're still at noexcept(true) and there's a throw() callee,
   // change to that specification.
   case EST_DynamicNone:
@@ -18020,6 +18025,7 @@ bool Sema::checkThisInStaticMemberFunctionExceptionSpec(CXXMethodDecl *Method) {
   case EST_Uninstantiated:
   case EST_Unevaluated:
   case EST_BasicNoexcept:
+  case EST_BasicThrows:
   case EST_NoThrow:
   case EST_DynamicNone:
   case EST_MSAny:

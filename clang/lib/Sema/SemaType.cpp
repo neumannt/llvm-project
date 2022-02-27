@@ -7637,6 +7637,7 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
       case EST_Dynamic:
       case EST_MSAny:
       case EST_NoexceptFalse:
+      case EST_BasicThrows:
         S.Diag(attr.getLoc(), diag::warn_nothrow_attribute_ignored);
         break;
       }

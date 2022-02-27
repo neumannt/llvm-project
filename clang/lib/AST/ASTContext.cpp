@@ -4289,6 +4289,10 @@ static bool isCanonicalExceptionSpecification(
   if (ESI.Type == EST_BasicNoexcept)
     return true;
 
+  if (ESI.Type == EST_BasicThrows)
+    return true;
+
+
   // A noexcept(expr) specification is (possibly) canonical if expr is
   // value-dependent.
   if (ESI.Type == EST_DependentNoexcept)
@@ -4409,6 +4413,10 @@ QualType ASTContext::getFunctionTypeInternal(
       case EST_NoexceptTrue:
       case EST_NoThrow:
         CanonicalEPI.ExceptionSpec.Type = EST_BasicNoexcept;
+        break;
+
+      case EST_BasicThrows:
+        CanonicalEPI.ExceptionSpec.Type = EST_BasicThrows;
         break;
 
       case EST_DependentNoexcept:

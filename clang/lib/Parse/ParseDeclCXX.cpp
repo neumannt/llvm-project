@@ -3847,6 +3847,19 @@ Parser::tryParseExceptionSpecification(bool Delayed,
            "Produced different number of exception types and ranges.");
   }
 
+  // Check for throws statement
+  if (Tok.is(tok::identifier) && getLangOpts().ThrowingValues) {
+    IdentifierInfo *II = Tok.getIdentifierInfo();
+    if (!Ident_throws) {
+      Ident_throws = &PP.getIdentifierTable().get("throws");
+    }
+    if (II == Ident_throws) {
+      ConsumeToken();
+      return EST_BasicThrows;
+    }
+  }
+
+
   // If there's no noexcept specification, we're done.
   if (Tok.isNot(tok::kw_noexcept))
     return Result;

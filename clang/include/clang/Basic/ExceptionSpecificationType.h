@@ -27,6 +27,7 @@ enum ExceptionSpecificationType {
   EST_DependentNoexcept,///< noexcept(expression), value-dependent
   EST_NoexceptFalse,    ///< noexcept(expression), evals to 'false'
   EST_NoexceptTrue,     ///< noexcept(expression), evals to 'true'
+  EST_BasicThrows,      ///< throws
   EST_Unevaluated,      ///< not evaluated yet, for special member function
   EST_Uninstantiated,   ///< not instantiated yet
   EST_Unparsed          ///< not parsed yet
@@ -44,6 +45,10 @@ inline bool isComputedNoexcept(ExceptionSpecificationType ESpecType) {
 inline bool isNoexceptExceptionSpec(ExceptionSpecificationType ESpecType) {
   return ESpecType == EST_BasicNoexcept || ESpecType == EST_NoThrow ||
          isComputedNoexcept(ESpecType);
+}
+
+inline bool isThrowsExceptionSpec(ExceptionSpecificationType ESpecType) {
+  return ESpecType == EST_BasicThrows;
 }
 
 inline bool isUnresolvedExceptionSpec(ExceptionSpecificationType ESpecType) {
