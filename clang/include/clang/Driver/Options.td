@@ -2053,6 +2053,15 @@ def fno_experimental_relative_cxx_abi_vtables :
   Group<f_clang_Group>, Flags<[CC1Option]>,
   HelpText<"Do not use the experimental C++ class ABI for classes with virtual tables">;
 
+def fexperimental_throwing_values :
+  Flag<["-"], "fexperimental-throwing-values">,
+  Group<f_clang_Group>, Flags<[CC1Option]>,
+  HelpText<"Enable experimental support for P0709 throwing values">;
+def fno_experimental_throwing_values :
+  Flag<["-"], "fno-experimental-throwing-values">,
+  Group<f_clang_Group>, Flags<[CC1Option]>,
+  HelpText<"Disable experimental support for P0709 throwing values">;
+
 def fcxx_abi_EQ : Joined<["-"], "fc++-abi=">,
                   Group<f_clang_Group>, Flags<[CC1Option]>,
                   HelpText<"C++ ABI to use. This will override the target C++ ABI.">;

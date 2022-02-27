@@ -3586,6 +3586,12 @@ void CompilerInvocation::GenerateLangArgs(const LangOptions &Opts,
   else
     GenerateArg(Args, OPT_fno_experimental_relative_cxx_abi_vtables, SA);
 
+  if (Opts.ThrowingValues)
+    GenerateArg(Args, OPT_fexperimental_throwing_values, SA);
+  else
+    GenerateArg(Args, OPT_fno_experimental_throwing_values, SA);
+
+
   for (const auto &MP : Opts.MacroPrefixMap)
     GenerateArg(Args, OPT_fmacro_prefix_map_EQ, MP.first + "=" + MP.second, SA);
 }
@@ -4125,6 +4131,10 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
       Args.hasFlag(options::OPT_fexperimental_relative_cxx_abi_vtables,
                    options::OPT_fno_experimental_relative_cxx_abi_vtables,
                    TargetCXXABI::usesRelativeVTables(T));
+
+  Opts.ThrowingValues =
+      Args.hasFlag(options::OPT_fexperimental_throwing_values,
+                   options::OPT_fno_experimental_throwing_values);
 
   for (const auto &A : Args.getAllArgValues(OPT_fmacro_prefix_map_EQ)) {
     auto Split = StringRef(A).split('=');

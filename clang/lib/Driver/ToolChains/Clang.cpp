@@ -5169,6 +5169,9 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddLastArg(CmdArgs, options::OPT_fexperimental_relative_cxx_abi_vtables,
                   options::OPT_fno_experimental_relative_cxx_abi_vtables);
 
+  Args.AddLastArg(CmdArgs, options::OPT_fexperimental_throwing_values,
+                  options::OPT_fno_experimental_throwing_values);
+
   // Handle segmented stacks.
   if (Args.hasFlag(options::OPT_fsplit_stack, options::OPT_fno_split_stack,
                    false))
