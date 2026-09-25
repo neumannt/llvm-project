@@ -590,6 +590,39 @@ static void EmitCleanup(CodeGenFunction &CGF,
     CGF.EmitBlock(ContBB);
 }
 
+void CodeGenFunction::EmitCleanupInline(EHScopeStack::stable_iterator C) {
+  EHCleanupScope &Scope = cast<EHCleanupScope>(*EHStack.find(C));
+
+  // Copy the cleanup out of the stack; emitting it might reallocate the stack.
+  auto *CleanupSource = reinterpret_cast<char *>(Scope.getCleanupBuffer());
+  alignas(EHScopeStack::ScopeStackAlignment) char
+      CleanupBufferStack[8 * sizeof(void *)];
+  std::unique_ptr<char[]> CleanupBufferHeap;
+  size_t CleanupSize = Scope.getCleanupSize();
+  EHScopeStack::Cleanup *Fn;
+  if (CleanupSize <= sizeof(CleanupBufferStack)) {
+    memcpy(CleanupBufferStack, CleanupSource, CleanupSize);
+    Fn = reinterpret_cast<EHScopeStack::Cleanup *>(CleanupBufferStack);
+  } else {
+    CleanupBufferHeap.reset(new char[CleanupSize]);
+    memcpy(CleanupBufferHeap.get(), CleanupSource, CleanupSize);
+    Fn = reinterpret_cast<EHScopeStack::Cleanup *>(CleanupBufferHeap.get());
+  }
+
+  EHScopeStack::Cleanup::Flags CleanupFlags;
+  if (Scope.isNormalCleanup())
+    CleanupFlags.setIsNormalCleanupKind();
+  if (Scope.isEHCleanup())
+    CleanupFlags.setIsEHCleanupKind();
+
+  // The cleanup is used now, so its auxiliary allocas must be kept.
+  Scope.MarkEmitted();
+
+  // If the cleanup has an activation flag, it reflects the dynamic state;
+  // otherwise the cleanup is active here (the caller checked).
+  EmitCleanup(*this, Fn, CleanupFlags, Scope.getActiveFlag());
+}
+
 static void ForwardPrebranchedFallthrough(llvm::BasicBlock *Exit,
                                           llvm::BasicBlock *From,
                                           llvm::BasicBlock *To) {
@@ -1070,7 +1103,13 @@ void CodeGenFunction::PopCleanupBlock(bool FallthroughIsBranchThrough,
     // active or was used before it was deactivated.
     if (EHActiveFlag.isValid() || IsActive) {
       cleanupFlags.setIsForEHCleanup();
+      // P0709: a static exception escaping an EH cleanup terminates, too.
+      bool PushedStaticTerminate = getLangOpts().StaticExceptions;
+      if (PushedStaticTerminate)
+        pushStaticErrorTerminate();
       EmitCleanup(*this, Fn, cleanupFlags, EHActiveFlag);
+      if (PushedStaticTerminate)
+        popStaticErrorTerminate();
     }
 
     if (CPI)

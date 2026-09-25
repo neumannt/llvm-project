@@ -544,7 +544,7 @@ static void EmitBaseInitializer(CodeGenFunction &CGF,
 
   CGF.EmitAggExpr(BaseInit->getInit(), AggSlot);
 
-  if (CGF.CGM.getLangOpts().Exceptions &&
+  if (CGF.needsEHOnlyCleanups() &&
       !BaseClassDecl->hasTrivialDestructor())
     CGF.EHStack.pushCleanup<CallBaseDtor>(EHCleanup, BaseClassDecl,
                                           isBaseVirtual);
@@ -2119,7 +2119,7 @@ void CodeGenFunction::EmitCXXAggrConstructorCall(
 
     // Evaluate the constructor and its arguments in a regular
     // partial-destroy cleanup.
-    if (getLangOpts().Exceptions &&
+    if (needsEHOnlyCleanups() &&
         !ctor->getParent()->hasTrivialDestructor()) {
       Destroyer *destroyer = destroyCXXObject;
       pushRegularPartialArrayCleanup(arrayBegin, cur, type, eltAlignment,
@@ -2532,7 +2532,7 @@ void CodeGenFunction::EmitDelegatingCXXConstructorCall(
   EmitAggExpr(Ctor->init_begin()[0]->getInit(), AggSlot);
 
   const CXXRecordDecl *ClassDecl = Ctor->getParent();
-  if (CGM.getLangOpts().Exceptions && !ClassDecl->hasTrivialDestructor()) {
+  if (needsEHOnlyCleanups() && !ClassDecl->hasTrivialDestructor()) {
     CXXDtorType Type =
         CurGD.getCtorType() == Ctor_Complete ? Dtor_Complete : Dtor_Base;
 

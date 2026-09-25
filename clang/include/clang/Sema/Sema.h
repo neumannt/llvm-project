@@ -11323,6 +11323,61 @@ public:
 
   void DiagnoseExceptionUse(SourceLocation Loc, bool IsTry);
 
+  /// \name P0709 static exceptions ('throws'), see SemaStaticException.cpp.
+  /// @{
+
+  /// Check that 'throws' can be used, looking up std::error and the library
+  /// helpers on first use. Returns false (after diagnosing) on failure.
+  bool CheckStaticExceptionSupport(SourceLocation Loc);
+
+  /// Check the restrictions on functions declared 'throws'.
+  void CheckStaticExceptionFunctionDecl(FunctionDecl *FD);
+
+  /// Whether the innermost function whose body is being parsed is declared
+  /// 'throws'.
+  bool isInStaticExceptionFunction() const;
+  /// Whether the current function has a dependent 'throws(cond)'.
+  bool isInDependentStaticExceptionFunction() const;
+
+  /// Check the condition of a conditional static exception specification
+  /// 'throws(cond)'. If it is value-dependent, \p EST becomes
+  /// EST_DependentThrows, otherwise the value (0: no_except, 1:
+  /// static_except, 2: dynamic_except) selects EST_BasicNoexcept, EST_Throws
+  /// or EST_None.
+  ExprResult ActOnStaticExceptionSpecCondition(Expr *Cond, SourceLocation Loc,
+                                               ExceptionSpecificationType &EST);
+
+  /// End the scope of the declarations of the implicit try block of a P0709
+  /// standalone 'catch' in scope \p S (keeping function parameters).
+  void ActOnStandaloneCatch(Scope *S, SourceLocation CatchLoc);
+
+  /// Declare the implicit parameter 'std::error err' of the P0709 shorthand
+  /// 'catch { ... }'.
+  Decl *ActOnImplicitStaticCatchParameter(Scope *S, SourceLocation Loc);
+
+  /// The type std::except_t if the library declares it, else int.
+  QualType getStdExceptTType(SourceLocation Loc);
+
+  /// Build the P0709 'throws(expr)' operator.
+  ExprResult BuildCXXExceptModeExpr(SourceLocation KeyLoc, Expr *Operand,
+                                    SourceLocation RParen);
+  ExprResult ActOnCXXExceptModeExpr(SourceLocation KeyLoc,
+                                    SourceLocation LParen, Expr *Operand,
+                                    SourceLocation RParen);
+
+  /// While set, canThrow() treats calls to 'throws' functions as
+  /// non-throwing (used to compute the 'throws(expr)' operator).
+  bool CanThrowIgnoresStaticExceptions = false;
+
+  /// Convert the operand of a throw-expression in a 'throws' function to
+  /// std::error. Returns an empty result if the operand is not convertible
+  /// (it then is thrown as a dynamic exception).
+  ExprResult BuildStaticThrowOperand(SourceLocation ThrowLoc, Expr *E);
+
+  /// Whether CheckStaticExceptionSupport succeeded.
+  bool StaticExceptionSupport = false;
+  /// @}
+
   StmtResult ActOnSEHTryBlock(bool IsCXXTry, // try (true) or __try (false) ?
                               SourceLocation TryLoc, Stmt *TryBlock,
                               Stmt *Handler);

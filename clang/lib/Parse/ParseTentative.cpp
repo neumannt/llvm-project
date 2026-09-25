@@ -1762,7 +1762,7 @@ bool Parser::isCXXFunctionDeclarator(
       if (Next.isOneOf(tok::amp, tok::ampamp, tok::kw_const, tok::kw_volatile,
                        tok::kw_throw, tok::kw_noexcept, tok::l_square,
                        tok::l_brace, tok::kw_try, tok::equal, tok::arrow) ||
-          isCXX11VirtSpecifier(Next))
+          isCXX11VirtSpecifier(Next) || isStaticExceptionSpecKeyword(Next))
         // The next token cannot appear after a constructor-style initializer,
         // and can appear next in a function definition. This must be a function
         // declarator.
@@ -1937,6 +1937,15 @@ Parser::TryParseFunctionDeclarator(bool MayHaveTrailingReturnType) {
     // Possibly an expression as well.
     if (Tok.is(tok::l_paren)) {
       // Find the matching rparen.
+      ConsumeParen();
+      if (!SkipUntil(tok::r_paren, StopAtSemi))
+        return TPResult::Error;
+    }
+  }
+  // P0709 'throws' or 'throws(cond)'.
+  if (isStaticExceptionSpecKeyword(Tok)) {
+    ConsumeToken();
+    if (Tok.is(tok::l_paren)) {
       ConsumeParen();
       if (!SkipUntil(tok::r_paren, StopAtSemi))
         return TPResult::Error;

@@ -884,7 +884,7 @@ static bool IsEquivalentExceptionSpec(StructuralEquivalenceContext &Context,
                                     Proto2->getExceptionType(I)))
         return false;
     }
-  } else if (isComputedNoexcept(Spec1)) {
+  } else if (hasExceptionSpecExpr(Spec1)) {
     if (!IsStructurallyEquivalent(Context, Proto1->getNoexceptExpr(),
                                   Proto2->getNoexceptExpr()))
       return false;

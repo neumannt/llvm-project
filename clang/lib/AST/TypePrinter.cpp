@@ -966,6 +966,12 @@ FunctionProtoType::printExceptionSpecification(raw_ostream &OS,
     OS << ')';
   } else if (EST_NoThrow == getExceptionSpecType()) {
     OS << " __attribute__((nothrow))";
+  } else if (EST_Throws == getExceptionSpecType()) {
+    OS << " throws";
+  } else if (EST_DependentThrows == getExceptionSpecType()) {
+    OS << " throws(";
+    getNoexceptExpr()->printPretty(OS, nullptr, Policy);
+    OS << ')';
   } else if (isNoexceptExceptionSpec(getExceptionSpecType())) {
     OS << " noexcept";
     // FIXME:Is it useful to print out the expression for a non-dependent

@@ -747,6 +747,10 @@ enum ASTRecordTypes {
   /// Record that encodes the number of submodules, their base ID in the AST
   /// file, and for each module the relative bit offset into the stream.
   SUBMODULE_METADATA = 80,
+
+  /// Record code for the P0709 static exceptions support declarations
+  /// (std::error and the library helpers) that Sema sets up.
+  STATIC_EXCEPTION_DECL_REFS = 81,
 };
 
 /// Record types used within a source manager block.
@@ -1936,6 +1940,7 @@ enum StmtCode {
 
   EXPR_CXX_EXPRESSION_TRAIT, // ExpressionTraitExpr
   EXPR_CXX_NOEXCEPT,         // CXXNoexceptExpr
+  EXPR_CXX_EXCEPT_MODE,      // CXXExceptModeExpr
 
   EXPR_OPAQUE_VALUE,                // OpaqueValueExpr
   EXPR_BINARY_CONDITIONAL_OPERATOR, // BinaryConditionalOperator

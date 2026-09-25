@@ -18,18 +18,20 @@ namespace clang {
 
 /// The various types of exception specifications that exist in C++11.
 enum ExceptionSpecificationType {
-  EST_None,             ///< no exception specification
-  EST_DynamicNone,      ///< throw()
-  EST_Dynamic,          ///< throw(T1, T2)
-  EST_MSAny,            ///< Microsoft throw(...) extension
-  EST_NoThrow,          ///< Microsoft __declspec(nothrow) extension
-  EST_BasicNoexcept,    ///< noexcept
-  EST_DependentNoexcept,///< noexcept(expression), value-dependent
-  EST_NoexceptFalse,    ///< noexcept(expression), evals to 'false'
-  EST_NoexceptTrue,     ///< noexcept(expression), evals to 'true'
-  EST_Unevaluated,      ///< not evaluated yet, for special member function
-  EST_Uninstantiated,   ///< not instantiated yet
-  EST_Unparsed          ///< not parsed yet
+  EST_None,              ///< no exception specification
+  EST_DynamicNone,       ///< throw()
+  EST_Dynamic,           ///< throw(T1, T2)
+  EST_MSAny,             ///< Microsoft throw(...) extension
+  EST_NoThrow,           ///< Microsoft __declspec(nothrow) extension
+  EST_BasicNoexcept,     ///< noexcept
+  EST_DependentNoexcept, ///< noexcept(expression), value-dependent
+  EST_NoexceptFalse,     ///< noexcept(expression), evals to 'false'
+  EST_NoexceptTrue,      ///< noexcept(expression), evals to 'true'
+  EST_Unevaluated,       ///< not evaluated yet, for special member function
+  EST_Uninstantiated,    ///< not instantiated yet
+  EST_Unparsed,          ///< not parsed yet
+  EST_Throws,            ///< P0709 static exception specification 'throws'
+  EST_DependentThrows    ///< P0709 'throws(expression)', value-dependent
 };
 
 inline bool isDynamicExceptionSpec(ExceptionSpecificationType ESpecType) {
@@ -44,6 +46,21 @@ inline bool isComputedNoexcept(ExceptionSpecificationType ESpecType) {
 inline bool isNoexceptExceptionSpec(ExceptionSpecificationType ESpecType) {
   return ESpecType == EST_BasicNoexcept || ESpecType == EST_NoThrow ||
          isComputedNoexcept(ESpecType);
+}
+
+/// Whether this is a P0709 static-exception-specification, which changes the
+/// calling convention of the function (errors are returned via a hidden
+/// std::error out-parameter).
+inline bool isStaticExceptionSpec(ExceptionSpecificationType ESpecType) {
+  return ESpecType == EST_Throws;
+}
+
+/// Whether an exception specification of this kind stores an expression:
+/// noexcept(expr), or the P0709 conditional static exception specification
+/// throws(expr) while it is value-dependent. (A non-dependent throws(expr) is
+/// resolved to one of noexcept, throws, or no exception specification.)
+inline bool hasExceptionSpecExpr(ExceptionSpecificationType ESpecType) {
+  return isComputedNoexcept(ESpecType) || ESpecType == EST_DependentThrows;
 }
 
 inline bool isUnresolvedExceptionSpec(ExceptionSpecificationType ESpecType) {

@@ -535,6 +535,15 @@ class ASTContext : public RefCountedBase<ASTContext> {
 
   /// Declaration for the CUDA cudaConfigureCall function.
   FunctionDecl *cudaConfigureCallDecl = nullptr;
+
+  /// P0709 static exceptions: the std::error class and the library helpers
+  /// that translate between static and dynamic exceptions.
+  CXXRecordDecl *StdErrorDecl = nullptr;
+  FunctionDecl *StdErrorFromCurrentExceptionDecl = nullptr;
+  FunctionDecl *StdThrowErrorAsDynamicDecl = nullptr;
+  FunctionDecl *StdNotifyErrorPropagationDecl = nullptr;
+  CXXConstructorDecl *StdErrorCopyConstructorDecl = nullptr;
+  CXXConstructorDecl *StdErrorMoveConstructorDecl = nullptr;
   /// Declaration for the CUDA cudaGetParameterBuffer function.
   FunctionDecl *cudaGetParameterBufferDecl = nullptr;
   /// Declaration for the CUDA cudaLaunchDevice function.
@@ -1773,6 +1782,54 @@ public:
   void setcudaConfigureCallDecl(FunctionDecl *FD) {
     cudaConfigureCallDecl = FD;
   }
+
+  /// P0709 static exceptions support declarations, set up by Sema.
+  void setStaticExceptionDecls(CXXRecordDecl *Error,
+                               FunctionDecl *ErrorFromCurrentException,
+                               FunctionDecl *ThrowErrorAsDynamic) {
+    StdErrorDecl = Error;
+    StdErrorFromCurrentExceptionDecl = ErrorFromCurrentException;
+    StdThrowErrorAsDynamicDecl = ThrowErrorAsDynamic;
+  }
+  /// The definition of std::error, or null if not (yet) known.
+  CXXRecordDecl *getStdErrorDecl() const { return StdErrorDecl; }
+  /// std::error __error_from_current_exception() noexcept.
+  FunctionDecl *getStdErrorFromCurrentExceptionDecl() const {
+    return StdErrorFromCurrentExceptionDecl;
+  }
+  /// [[noreturn]] void __throw_error_as_dynamic(std::error).
+  FunctionDecl *getStdThrowErrorAsDynamicDecl() const {
+    return StdThrowErrorAsDynamicDecl;
+  }
+  /// void __notify_error_propagation(const std::error &) noexcept, called when
+  /// a 'throws' function exits with an error if
+  /// -fstatic-exceptions-propagation-hook is enabled.
+  void setStdNotifyErrorPropagationDecl(FunctionDecl *FD) {
+    StdNotifyErrorPropagationDecl = FD;
+  }
+  FunctionDecl *getStdNotifyErrorPropagationDecl() const {
+    return StdNotifyErrorPropagationDecl;
+  }
+  /// The copy constructor of std::error, or null if std::error is trivially
+  /// copyable.
+  void setStdErrorCopyConstructorDecl(CXXConstructorDecl *CD) {
+    StdErrorCopyConstructorDecl = CD;
+  }
+  CXXConstructorDecl *getStdErrorCopyConstructorDecl() const {
+    return StdErrorCopyConstructorDecl;
+  }
+  /// The move constructor of std::error, or null if std::error is trivially
+  /// copyable.
+  void setStdErrorMoveConstructorDecl(CXXConstructorDecl *CD) {
+    StdErrorMoveConstructorDecl = CD;
+  }
+  CXXConstructorDecl *getStdErrorMoveConstructorDecl() const {
+    return StdErrorMoveConstructorDecl;
+  }
+  /// The type std::error. Only valid if getStdErrorDecl() is non-null.
+  QualType getStdErrorType() const;
+  /// Whether \p T, ignoring references and cv-qualifiers, is std::error.
+  bool isStdErrorType(QualType T) const;
 
   FunctionDecl *getcudaConfigureCallDecl() {
     return cudaConfigureCallDecl;

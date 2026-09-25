@@ -16121,6 +16121,9 @@ public:
   bool VisitUnaryImag(const UnaryOperator *E);
 
   bool VisitCXXNoexceptExpr(const CXXNoexceptExpr *E);
+  bool VisitCXXExceptModeExpr(const CXXExceptModeExpr *E) {
+    return Success(E->getMode(), E);
+  }
   bool VisitSizeOfPackExpr(const SizeOfPackExpr *E);
   bool VisitSourceLocExpr(const SourceLocExpr *E);
   bool VisitConceptSpecializationExpr(const ConceptSpecializationExpr *E);
@@ -22503,6 +22506,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
   case Expr::ArrayTypeTraitExprClass:
   case Expr::ExpressionTraitExprClass:
   case Expr::CXXNoexceptExprClass:
+  case Expr::CXXExceptModeExprClass:
   case Expr::CXXReflectExprClass:
     return NoDiag();
   case Expr::CallExprClass:

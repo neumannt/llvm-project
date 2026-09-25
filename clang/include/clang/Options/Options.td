@@ -2322,6 +2322,19 @@ defm cxx_exceptions: BoolFOption<"cxx-exceptions",
   LangOpts<"CXXExceptions">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option], "Enable C++ exceptions">,
   NegFlag<SetFalse>>;
+defm static_exceptions: BoolFOption<"static-exceptions",
+  LangOpts<"StaticExceptions">, DefaultFalse,
+  PosFlag<SetTrue, [], [ClangOption, CC1Option],
+          "Enable P0709 zero-overhead deterministic exceptions ('throws')">,
+  NegFlag<SetFalse>>, ShouldParseIf<cplusplus.KeyPath>;
+defm static_exceptions_propagation_hook
+    : BoolFOption<"static-exceptions-propagation-hook",
+                  LangOpts<"StaticExceptionsPropagationHook">, DefaultFalse,
+                  PosFlag<SetTrue, [], [ClangOption, CC1Option],
+                          "Call the std::set_on_error_propagation() hook "
+                          "whenever a 'throws' function exits with an error">,
+                  NegFlag<SetFalse>>,
+      ShouldParseIf<cplusplus.KeyPath>;
 defm async_exceptions: BoolFOption<"async-exceptions",
   LangOpts<"EHAsynch">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option],

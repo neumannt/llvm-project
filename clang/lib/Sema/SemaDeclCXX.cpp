@@ -228,6 +228,9 @@ Sema::ImplicitExceptionSpecification::CalledDecl(SourceLocation CallLoc,
     llvm_unreachable("should not see unresolved exception specs here");
 
   // If this function can throw any exceptions, make a note of that.
+  // A function with a static exception specification can fail, which the
+  // implicit special member reports as a dynamic exception.
+  case EST_Throws:
   case EST_MSAny:
   case EST_None:
     // FIXME: Whichever we see last of MSAny and None determines our result.
@@ -253,6 +256,7 @@ Sema::ImplicitExceptionSpecification::CalledDecl(SourceLocation CallLoc,
       ComputedEST = EST_DynamicNone;
     return;
   case EST_DependentNoexcept:
+  case EST_DependentThrows:
     llvm_unreachable(
         "should not generate implicit declarations for dependent cases");
   case EST_Dynamic:
@@ -19781,9 +19785,11 @@ bool Sema::checkThisInStaticMemberFunctionExceptionSpec(CXXMethodDecl *Method) {
   case EST_DynamicNone:
   case EST_MSAny:
   case EST_None:
+  case EST_Throws:
     break;
 
   case EST_DependentNoexcept:
+  case EST_DependentThrows:
   case EST_NoexceptFalse:
   case EST_NoexceptTrue:
     if (!Finder.TraverseStmt(Proto->getNoexceptExpr()))
@@ -19877,6 +19883,15 @@ void Sema::checkExceptionSpecification(
     return;
   }
 
+  if (EST == EST_DependentThrows) {
+    if (IsTopLevel && DiagnoseUnexpandedParameterPack(NoexceptExpr)) {
+      ESI.Type = EST_Throws;
+      return;
+    }
+    ESI.NoexceptExpr = NoexceptExpr;
+    return;
+  }
+
   if (isComputedNoexcept(EST)) {
     assert((NoexceptExpr->isTypeDependent() ||
             NoexceptExpr->getType()->getCanonicalTypeUnqualified() ==
@@ -19916,6 +19931,9 @@ void Sema::actOnDelayedExceptionSpecification(
 
   // Update the exception specification on the function type.
   Context.adjustExceptionSpec(FD, ESI, /*AsWritten=*/true);
+
+  if (getLangOpts().StaticExceptions)
+    CheckStaticExceptionFunctionDecl(FD);
 
   if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(D)) {
     if (MD->isStatic())

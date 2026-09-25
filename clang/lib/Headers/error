@@ -1,0 +1,391 @@
+// -*- C++ -*-
+/*===---- error - P0709 static exceptions prototype -----------------------===
+ *
+ * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+ * See https://llvm.org/LICENSE.txt for license information.
+ * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+ *
+ *===-----------------------------------------------------------------------===
+ *
+ * Library support for the prototype of P0709 "Zero-overhead deterministic
+ * exceptions: Throwing values" (-fstatic-exceptions).
+ *
+ * std::error is the type of static exceptions. It is two pointers in size,
+ * trivially copyable, and always represents a failure: it holds a pointer to
+ * an error_category (its "domain") and a value in that domain. Comparisons
+ * are semantic across domains via error_category::equivalent, e.g.
+ *
+ *   int f() throws { throw std::errc::invalid_argument; }
+ *   ...
+ *   catch (std::error e) { if (e == std::errc::invalid_argument) ... }
+ *
+ * The compiler relies on the following (checked by Sema):
+ *  - std::error is trivially relocatable ([[clang::trivial_abi]]), so it is
+ *    passed and returned in registers and moved with memcpy;
+ *  - its first member is the domain pointer, which is never null for a valid
+ *    error; the compiler leaves a std::error that it moved from with a null
+ *    domain, and the destructor does nothing for it;
+ *  - std::__error_from_current_exception() translates the currently handled
+ *    dynamic exception into an error (used when a dynamic exception escapes
+ *    a 'throws' function);
+ *  - std::__throw_error_as_dynamic(error) throws an error as a dynamic
+ *    exception (used when a static exception reaches a function that is not
+ *    declared 'throws').
+ *
+ *===-----------------------------------------------------------------------===
+ */
+
+#ifndef __CLANG_STATIC_EXCEPTIONS_ERROR
+#define __CLANG_STATIC_EXCEPTIONS_ERROR
+
+#if !__has_feature(static_exceptions)
+#error "<error> requires -fstatic-exceptions"
+#endif
+#if __cplusplus < 201703L
+#error "<error> requires C++17 or later"
+#endif
+
+#include <atomic>
+#include <cstdint>
+#include <exception>
+#include <new>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <type_traits>
+
+namespace std {
+
+/// The result of the P0709 'throws(expr)' operator and the condition of a
+/// conditional 'throws(cond)' specification. The values are chosen so that
+/// std::max combines the modes of several operations.
+enum except_t { no_except = false, static_except = true, dynamic_except };
+
+class error;
+
+namespace __static_error {
+
+/// The domain of the default-constructed, nonspecific error.
+class __unspecified_domain_t final : public error_category {
+public:
+  const char *name() const noexcept override { return "unspecified"; }
+  string message(int) const override { return "unspecified error"; }
+};
+
+/// A constant-initialized replacement for std::generic_category(), so that
+/// 'throw std::errc::...' does not need to call into the library. It
+/// compares equivalent to std::generic_category() errors.
+class __generic_domain_t final : public error_category {
+public:
+  const char *name() const noexcept override { return "generic"; }
+  string message(int __v) const override {
+    return generic_category().message(__v);
+  }
+  error_condition default_error_condition(int __v) const noexcept override {
+    return error_condition(__v, generic_category());
+  }
+};
+
+/// The domain of errors wrapping a dynamic exception. The value holds the
+/// exception_ptr.
+class __dynamic_domain_t final : public error_category {
+public:
+  const char *name() const noexcept override { return "dynamic exception"; }
+  // Not used; error::message() handles this domain specially.
+  string message(int) const override { return "dynamic exception"; }
+};
+
+// Constant-initialized and never destroyed: no guards, no atexit.
+[[clang::no_destroy]] inline const __unspecified_domain_t
+    __unspecified_domain{};
+[[clang::no_destroy]] inline const __generic_domain_t __generic_domain{};
+[[clang::no_destroy]] inline const __dynamic_domain_t __dynamic_domain{};
+
+struct __wrap_tag {};
+
+} // namespace __static_error
+
+/// The type of P0709 static exceptions. An error wrapping a dynamic exception
+/// owns it (the value holds an exception_ptr); copies share it.
+class [[clang::trivial_abi]] error {
+  // Must be the first member, and must never be null (except in an error
+  // the compiler moved from, which is only destroyed).
+  const error_category *__domain_;
+  intptr_t __value_;
+
+  static_assert(sizeof(exception_ptr) == sizeof(intptr_t) &&
+                    alignof(exception_ptr) <= alignof(intptr_t),
+                "exception_ptr must fit into the value of std::error");
+
+  exception_ptr *__ptr() noexcept {
+    return std::launder(reinterpret_cast<exception_ptr *>(&__value_));
+  }
+  const exception_ptr *__ptr() const noexcept {
+    return std::launder(reinterpret_cast<const exception_ptr *>(&__value_));
+  }
+  /// Release a wrapped dynamic exception given the value of an error. Out
+  /// of line and by value, so that the check in the destructor is all that
+  /// remains in handlers.
+  [[gnu::cold, gnu::noinline]] static void
+  __release_dynamic(intptr_t __v) noexcept {
+    alignas(exception_ptr) unsigned char __buf[sizeof(exception_ptr)];
+    __builtin_memcpy(__buf, &__v, sizeof(__v));
+    std::launder(reinterpret_cast<exception_ptr *>(__buf))->~exception_ptr();
+  }
+  void __destroy() noexcept {
+    if (__builtin_expect(__domain_ == &__static_error::__dynamic_domain, 0))
+      __release_dynamic(__value_);
+  }
+  void __copy_from(const error &__o) noexcept {
+    __domain_ = __o.__domain_;
+    if (__o.is_dynamic_exception())
+      ::new (static_cast<void *>(&__value_)) exception_ptr(*__o.__ptr());
+    else
+      __value_ = __o.__value_;
+  }
+  void __move_from(error &__o) noexcept {
+    // exception_ptr is trivially relocatable.
+    __domain_ = __o.__domain_;
+    __value_ = __o.__value_;
+    __o.__domain_ = &__static_error::__unspecified_domain;
+    __o.__value_ = 0;
+  }
+
+public:
+  /// A general, nonspecific error.
+  constexpr error() noexcept
+      : __domain_(&__static_error::__unspecified_domain), __value_(0) {}
+
+  error(errc __e) noexcept
+      : __domain_(&__static_error::__generic_domain),
+        __value_(static_cast<int>(__e)) {}
+
+  error(const error_code &__ec) noexcept
+      : __domain_(&__ec.category()), __value_(__ec.value()) {
+    // An error always represents a failure.
+    if (__value_ == 0)
+      __domain_ = &__static_error::__unspecified_domain;
+  }
+
+  error(const error_condition &__ec) noexcept
+      : __domain_(&__ec.category()), __value_(__ec.value()) {
+    if (__value_ == 0)
+      __domain_ = &__static_error::__unspecified_domain;
+  }
+
+  template <class _Ep,
+            enable_if_t<is_error_code_enum_v<_Ep>, int> = 0>
+  error(_Ep __e) noexcept : error(make_error_code(__e)) {}
+
+  template <class _Ep,
+            enable_if_t<is_error_condition_enum_v<_Ep> &&
+                            !is_same_v<_Ep, errc>,
+                        int> = 0>
+  error(_Ep __e) noexcept : error(make_error_condition(__e)) {}
+
+  /// Wrap a dynamic exception (used by __error_from_current_exception).
+  error(__static_error::__wrap_tag, exception_ptr __p) noexcept
+      : __domain_(&__static_error::__dynamic_domain) {
+    ::new (static_cast<void *>(&__value_)) exception_ptr(std::move(__p));
+  }
+
+  error(const error &__o) noexcept { __copy_from(__o); }
+  /// A moved-from error is the nonspecific error.
+  error(error &&__o) noexcept { __move_from(__o); }
+  error &operator=(const error &__o) noexcept {
+    if (this != &__o) {
+      __destroy();
+      __copy_from(__o);
+    }
+    return *this;
+  }
+  error &operator=(error &&__o) noexcept {
+    if (this != &__o) {
+      __destroy();
+      __move_from(__o);
+    }
+    return *this;
+  }
+  ~error() { __destroy(); }
+
+  /// The error's domain.
+  const error_category &domain() const noexcept { return *__domain_; }
+  /// The error's value within its domain (unspecified for an error wrapping
+  /// a dynamic exception).
+  intptr_t value() const noexcept { return __value_; }
+
+  /// Whether this error wraps a dynamic exception.
+  bool is_dynamic_exception() const noexcept {
+    return __domain_ == &__static_error::__dynamic_domain;
+  }
+  /// The wrapped dynamic exception, if any.
+  exception_ptr exception() const noexcept {
+    if (!is_dynamic_exception())
+      return nullptr;
+    return *__ptr();
+  }
+
+  /// The error as an error_code (value 0 in the dynamic domain).
+  error_code code() const noexcept {
+    if (is_dynamic_exception())
+      return error_code(0, *__domain_);
+    return error_code(static_cast<int>(__value_), *__domain_);
+  }
+
+  string message() const {
+    if (is_dynamic_exception()) {
+#if __cpp_exceptions
+      try {
+        rethrow_exception(exception());
+      } catch (const std::exception &__ex) {
+        return string("dynamic exception: ") + __ex.what();
+      } catch (...) {
+      }
+#endif
+      return "dynamic exception";
+    }
+    return __domain_->message(static_cast<int>(__value_));
+  }
+
+  /// Semantic comparison (across domains) with an error condition.
+  bool __equivalent(const error_condition &__c) const noexcept {
+    if (is_dynamic_exception())
+      return __dynamic_condition() == __c;
+    int __v = static_cast<int>(__value_);
+    return __domain_->equivalent(__v, __c) ||
+           __c.category().equivalent(error_code(__v, *__domain_), __c.value());
+  }
+
+  friend bool operator==(const error &__a, const error &__b) noexcept {
+    if (__a.__domain_ == __b.__domain_ && __a.__value_ == __b.__value_)
+      return true;
+    if (__a.is_dynamic_exception() || __b.is_dynamic_exception())
+      return false;
+    return __a.__equivalent(__b.__domain_->default_error_condition(
+               static_cast<int>(__b.__value_))) ||
+           __b.__equivalent(__a.__domain_->default_error_condition(
+               static_cast<int>(__a.__value_)));
+  }
+  friend bool operator!=(const error &__a, const error &__b) noexcept {
+    return !(__a == __b);
+  }
+
+  friend bool operator==(const error &__a, errc __e) noexcept {
+    return __a.__equivalent(make_error_condition(__e));
+  }
+  friend bool operator==(errc __e, const error &__a) noexcept {
+    return __a == __e;
+  }
+  friend bool operator!=(const error &__a, errc __e) noexcept {
+    return !(__a == __e);
+  }
+  friend bool operator!=(errc __e, const error &__a) noexcept {
+    return !(__a == __e);
+  }
+
+  template <class _Ep, enable_if_t<is_error_code_enum_v<_Ep> ||
+                                       (is_error_condition_enum_v<_Ep> &&
+                                        !is_same_v<_Ep, errc>),
+                                   int> = 0>
+  friend bool operator==(const error &__a, _Ep __e) noexcept {
+    return __a == error(__e);
+  }
+  template <class _Ep, enable_if_t<is_error_code_enum_v<_Ep> ||
+                                       (is_error_condition_enum_v<_Ep> &&
+                                        !is_same_v<_Ep, errc>),
+                                   int> = 0>
+  friend bool operator!=(const error &__a, _Ep __e) noexcept {
+    return !(__a == error(__e));
+  }
+
+private:
+  /// The generic condition corresponding to a wrapped standard exception.
+  error_condition __dynamic_condition() const noexcept {
+#if __cpp_exceptions
+    try {
+      rethrow_exception(exception());
+    } catch (const bad_alloc &) {
+      return make_error_condition(errc::not_enough_memory);
+    } catch (const system_error &__e) {
+      return __e.code().default_error_condition();
+    } catch (const invalid_argument &) {
+      return make_error_condition(errc::invalid_argument);
+    } catch (const domain_error &) {
+      return make_error_condition(errc::argument_out_of_domain);
+    } catch (const out_of_range &) {
+      return make_error_condition(errc::result_out_of_range);
+    } catch (const length_error &) {
+      return make_error_condition(errc::value_too_large);
+    } catch (const overflow_error &) {
+      return make_error_condition(errc::value_too_large);
+    } catch (...) {
+    }
+#endif
+    return error_condition(0, __static_error::__unspecified_domain);
+  }
+};
+
+static_assert(sizeof(error) == 2 * sizeof(void *),
+              "std::error must be two pointers in size");
+
+#if __cpp_exceptions
+/// Translate the currently handled dynamic exception into an error. Called
+/// by the compiler when a dynamic exception escapes a 'throws' function.
+inline error __error_from_current_exception() noexcept {
+  try {
+    throw;
+  } catch (const error &__e) {
+    // A std::error thrown as a dynamic exception.
+    return __e;
+  } catch (const bad_alloc &) {
+    // Needs no allocation.
+    return errc::not_enough_memory;
+  } catch (const system_error &__e) {
+    if (__e.code())
+      return __e.code();
+  } catch (...) {
+  }
+  // Wrap everything else, so that it can be rethrown unchanged.
+  return error(__static_error::__wrap_tag{}, current_exception());
+}
+#endif
+
+/// P0709 4.4: a hook that is called whenever a 'throws' function exits with
+/// an error, if the program is compiled with
+/// -fstatic-exceptions-propagation-hook. It is expected to call the previously
+/// installed hook.
+using on_error_propagation = void (*)(error) noexcept;
+
+inline atomic<on_error_propagation> __on_error_propagation{nullptr};
+
+inline on_error_propagation
+set_on_error_propagation(on_error_propagation __f) noexcept {
+  return __on_error_propagation.exchange(__f);
+}
+
+/// Called by the compiler when a 'throws' function exits with an error.
+inline void __notify_error_propagation(const error &__e) noexcept {
+  if (on_error_propagation __f =
+          __on_error_propagation.load(memory_order_relaxed);
+      __builtin_expect(__f != nullptr, 0))
+    __f(__e);
+}
+
+/// Throw an error as a dynamic exception. Called by the compiler when a
+/// static exception reaches a function that is not declared 'throws'.
+[[noreturn]] inline void __throw_error_as_dynamic(error __e) {
+#if __cpp_exceptions
+  if (__e.is_dynamic_exception())
+    rethrow_exception(__e.exception());
+  if (__e == errc::not_enough_memory)
+    throw bad_alloc();
+  throw __e;
+#else
+  (void)__e;
+  __builtin_trap();
+#endif
+}
+
+} // namespace std
+
+#endif // __CLANG_STATIC_EXCEPTIONS_ERROR

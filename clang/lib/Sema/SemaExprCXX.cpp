@@ -882,7 +882,53 @@ ExprResult Sema::BuildCXXThrow(SourceLocation OpLoc, Expr *Ex,
     Diag(OpLoc, diag::err_acc_branch_in_out_compute_construct)
         << /*throw*/ 2 << /*out of*/ 0;
 
-  if (Ex && !Ex->isTypeDependent()) {
+  // P0709: in a 'throws' function, throwing a value convertible to
+  // std::error throws a static exception. With a dependent 'throws(cond)',
+  // that is only known after instantiation.
+  bool IsStaticThrow = false;
+  bool IsConversionDeferred = Ex && !Ex->isTypeDependent() &&
+                              getLangOpts().StaticExceptions &&
+                              isInDependentStaticExceptionFunction();
+  if (Ex && !Ex->isTypeDependent() && getLangOpts().StaticExceptions &&
+      isInStaticExceptionFunction()) {
+    ExprResult Res = BuildStaticThrowOperand(OpLoc, Ex);
+    if (Res.isInvalid())
+      return ExprError();
+    if (Res.isUsable()) {
+      Ex = Res.get();
+      IsStaticThrow = true;
+    } else {
+      Diag(OpLoc, diag::warn_static_exception_dynamic_throw) << Ex->getType();
+    }
+  }
+
+  // Throwing a dynamic exception requires dynamic exception support. Outside
+  // of a handler, 'throw;' rethrows a dynamic exception; in a handler, it
+  // rethrows what the handler caught, which is static if dynamic exceptions
+  // are disabled.
+  if (!IsStaticThrow && getLangOpts().StaticExceptions &&
+      !getLangOpts().CXXExceptions && !getLangOpts().CUDA &&
+      !getSourceManager().isInSystemHeader(OpLoc)) {
+    bool NeedsDynamic = false;
+    if (Ex) {
+      NeedsDynamic = !CurContext->isDependentContext();
+    } else if (!inTemplateInstantiation()) {
+      NeedsDynamic = true;
+      for (Scope *S = getCurScope(); S; S = S->getParent()) {
+        if (S->getFlags() & Scope::CatchScope) {
+          NeedsDynamic = false;
+          break;
+        }
+        if (S->getFlags() & (Scope::FnScope | Scope::BlockScope |
+                             Scope::ClassScope | Scope::ObjCMethodScope))
+          break;
+      }
+    }
+    if (NeedsDynamic)
+      targetDiag(OpLoc, diag::err_exceptions_disabled) << "throw";
+  }
+
+  if (Ex && !Ex->isTypeDependent() && !IsStaticThrow && !IsConversionDeferred) {
     // Initialize the exception result.  This implicitly weeds out
     // abstract types or types with inaccessible copy constructors.
 
@@ -918,7 +964,8 @@ ExprResult Sema::BuildCXXThrow(SourceLocation OpLoc, Expr *Ex,
     PPC().CheckPPCMMAType(Ex->getType(), Ex->getBeginLoc());
 
   return new (Context)
-      CXXThrowExpr(Ex, Context.VoidTy, OpLoc, IsThrownVarInScope);
+      CXXThrowExpr(Ex, Context.VoidTy, OpLoc, IsThrownVarInScope,
+                   IsConversionDeferred);
 }
 
 static void

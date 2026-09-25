@@ -83,6 +83,12 @@ ExprResult Parser::ParseAssignmentExpression(
 
   if (Tok.is(tok::kw_throw))
     return ParseThrowExpression();
+  // P0709 4.5: 'try' on an expression marks it as a (potential) exception
+  // path. It has the same precedence as 'throw' and no semantic effect.
+  if (Tok.is(tok::kw_try) && getLangOpts().StaticExceptions) {
+    ConsumeToken();
+    return ParseAssignmentExpression(CorrectionBehavior);
+  }
   if (Tok.is(tok::kw_co_yield))
     return ParseCoyieldExpression();
 
@@ -886,7 +892,36 @@ Parser::ParseCastExpression(CastParseKind ParseKind, bool isAddressOfOperand,
                                CorrectionBehavior, isVectorLiteral,
                                NotPrimaryExpression);
 
+  case tok::kw_try:
+    // P0709 4.5: 'try' marking an operand, as in 'i + try f()'.
+    if (getLangOpts().StaticExceptions) {
+      ConsumeToken();
+      return ParseCastExpression(ParseKind, isAddressOfOperand,
+                                 CorrectionBehavior, isVectorLiteral,
+                                 NotPrimaryExpression);
+    }
+    goto ExpectedExpression;
+
   case tok::identifier:
+    // P0709: the 'throws' '(' expression ')' operator.
+    if (isStaticExceptionSpecKeyword(Tok) && NextToken().is(tok::l_paren)) {
+      if (NotPrimaryExpression)
+        *NotPrimaryExpression = true;
+      SourceLocation KeyLoc = ConsumeToken();
+      BalancedDelimiterTracker T(*this, tok::l_paren);
+      T.consumeOpen();
+      // Like for noexcept, the operand is unevaluated.
+      EnterExpressionEvaluationContext Unevaluated(
+          Actions, Sema::ExpressionEvaluationContext::Unevaluated);
+      Res = ParseExpression();
+      T.consumeClose();
+      if (!Res.isInvalid())
+        Res = Actions.ActOnCXXExceptModeExpr(KeyLoc, T.getOpenLocation(),
+                                             Res.get(), T.getCloseLocation());
+      AllowSuffix = false;
+      break;
+    }
+    goto ParseIdentifier;
   ParseIdentifier: {    // primary-expression: identifier
                         // unqualified-id: identifier
                         // constant: enumeration-constant

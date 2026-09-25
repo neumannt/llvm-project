@@ -1562,6 +1562,18 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
 
   // Generate the body of the function.
   PGO->assignRegionCounters(GD, CurFn);
+
+  // P0709: dynamic exceptions escaping a 'throws' function (including its
+  // constructor initializers) are translated into std::error values.
+  bool TranslateDynamicExceptions = isStaticThrowsFunction() &&
+                                    getLangOpts().CXXExceptions &&
+                                    StaticErrorOutSlot.isValid();
+  EHScopeStack::stable_iterator TranslationDepth;
+  if (TranslateDynamicExceptions) {
+    TranslationDepth = EnterStaticExceptionTranslation();
+    StaticExceptionTranslationScope = TranslationDepth;
+  }
+
   if (isa<CXXDestructorDecl>(FD))
     EmitDestructorBody(Args);
   else if (isa<CXXConstructorDecl>(FD))
@@ -1617,6 +1629,11 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
     EmitFunctionBody(Body);
   } else
     llvm_unreachable("no definition for emitted function");
+
+  if (TranslateDynamicExceptions) {
+    StaticExceptionTranslationScope = EHScopeStack::stable_end();
+    ExitStaticExceptionTranslation(TranslationDepth);
+  }
 
   // C++11 [stmt.return]p2:
   //   Flowing off the end of a function [...] results in undefined behavior in

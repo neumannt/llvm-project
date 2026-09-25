@@ -3781,6 +3781,11 @@ public:
   ///
   /// By default, performs semantic analysis to build the new expression.
   /// Subclasses may override this routine to provide different behavior.
+  ExprResult RebuildCXXExceptModeExpr(SourceRange Range, Expr *Arg) {
+    return SemaRef.BuildCXXExceptModeExpr(Range.getBegin(), Arg,
+                                          Range.getEnd());
+  }
+
   ExprResult RebuildCXXNoexceptExpr(SourceRange Range, Expr *Arg) {
     return SemaRef.BuildCXXNoexceptExpr(Range.getBegin(), Arg, Range.getEnd());
   }
@@ -6903,6 +6908,31 @@ bool TreeTransform<Derived>::TransformExceptionSpec(
     SourceLocation Loc, FunctionProtoType::ExceptionSpecInfo &ESI,
     SmallVectorImpl<QualType> &Exceptions, bool &Changed) {
   assert(ESI.Type != EST_Uninstantiated && ESI.Type != EST_Unevaluated);
+
+  // Instantiate a dependent P0709 throws(expr).
+  if (ESI.Type == EST_DependentThrows) {
+    auto *Method = dyn_cast_if_present<CXXMethodDecl>(ESI.SourceTemplate);
+    Sema::CXXThisScopeRAII ThisScope(
+        SemaRef, Method ? Method->getParent() : nullptr,
+        Method ? Method->getMethodQualifiers() : Qualifiers{},
+        Method != nullptr);
+    EnterExpressionEvaluationContext Unevaluated(
+        getSema(), Sema::ExpressionEvaluationContext::ConstantEvaluated);
+    ExprResult CondExpr = getDerived().TransformExpr(ESI.NoexceptExpr);
+    if (CondExpr.isInvalid())
+      return true;
+
+    ExceptionSpecificationType EST = ESI.Type;
+    CondExpr =
+        getSema().ActOnStaticExceptionSpecCondition(CondExpr.get(), Loc, EST);
+    if (CondExpr.isInvalid())
+      return true;
+
+    Changed = true;
+    ESI.NoexceptExpr = EST == EST_DependentThrows ? CondExpr.get() : nullptr;
+    ESI.Type = EST;
+    return false;
+  }
 
   // Instantiate a dynamic noexcept expression, if any.
   if (isComputedNoexcept(ESI.Type)) {
@@ -15232,7 +15262,7 @@ TreeTransform<Derived>::TransformCXXThrowExpr(CXXThrowExpr *E) {
 
   getSema().DiagnoseExceptionUse(E->getThrowLoc(), /* IsTry= */ false);
 
-  if (!getDerived().AlwaysRebuild() &&
+  if (!getDerived().AlwaysRebuild() && !E->isOperandConversionDeferred() &&
       SubExpr.get() == E->getSubExpr())
     return E;
 
@@ -16922,6 +16952,22 @@ ExprResult TreeTransform<Derived>::TransformUnresolvedMemberExpr(
       Base.get(), BaseType, Old->getOperatorLoc(), Old->isArrow(), QualifierLoc,
       TemplateKWLoc, FirstQualifierInScope, R,
       (Old->hasExplicitTemplateArgs() ? &TransArgs : nullptr));
+}
+
+template <typename Derived>
+ExprResult
+TreeTransform<Derived>::TransformCXXExceptModeExpr(CXXExceptModeExpr *E) {
+  EnterExpressionEvaluationContext Unevaluated(
+      SemaRef, Sema::ExpressionEvaluationContext::Unevaluated);
+  ExprResult SubExpr = getDerived().TransformExpr(E->getOperand());
+  if (SubExpr.isInvalid())
+    return ExprError();
+
+  if (!getDerived().AlwaysRebuild() && SubExpr.get() == E->getOperand())
+    return E;
+
+  return getDerived().RebuildCXXExceptModeExpr(E->getSourceRange(),
+                                               SubExpr.get());
 }
 
 template<typename Derived>

@@ -3984,9 +3984,10 @@ FunctionProtoType::FunctionProtoType(QualType result, ArrayRef<QualType> params,
     }
   }
   // Fill in the Expr * in the exception specification if present.
-  else if (isComputedNoexcept(getExceptionSpecType())) {
+  else if (hasExceptionSpecExpr(getExceptionSpecType())) {
     assert(epi.ExceptionSpec.NoexceptExpr && "computed noexcept with no expr");
-    assert((getExceptionSpecType() == EST_DependentNoexcept) ==
+    assert((getExceptionSpecType() == EST_DependentNoexcept ||
+            getExceptionSpecType() == EST_DependentThrows) ==
            epi.ExceptionSpec.NoexceptExpr->isValueDependent());
 
     // Store the noexcept expression and context.
@@ -4016,7 +4017,8 @@ FunctionProtoType::FunctionProtoType(QualType result, ArrayRef<QualType> params,
   // then it's a dependent type. This only happens in C++17 onwards.
   if (isCanonicalUnqualified()) {
     if (getExceptionSpecType() == EST_Dynamic ||
-        getExceptionSpecType() == EST_DependentNoexcept) {
+        getExceptionSpecType() == EST_DependentNoexcept ||
+        getExceptionSpecType() == EST_DependentThrows) {
       assert(hasDependentExceptionSpec() && "type should not be canonical");
       addDependence(TypeDependence::DependentInstantiation);
     }
@@ -4110,6 +4112,8 @@ CanThrowResult FunctionProtoType::canThrow() const {
   case EST_None:
   case EST_MSAny:
   case EST_NoexceptFalse:
+  // P0709: a 'throws' function behaves as-if noexcept(false).
+  case EST_Throws:
     return CT_Can;
 
   case EST_Dynamic:
@@ -4122,6 +4126,7 @@ CanThrowResult FunctionProtoType::canThrow() const {
 
   case EST_Uninstantiated:
   case EST_DependentNoexcept:
+  case EST_DependentThrows:
     return CT_Dependent;
   }
 
@@ -4189,7 +4194,8 @@ void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID, QualType Result,
     // See clang/test/Modules/concept-specialization-deserialization.cppm for
     // an example.
     ID.AddPointer(epi.ExceptionSpec.NoexceptExpr);
-  } else if (epi.ExceptionSpec.Type == EST_DependentNoexcept) {
+  } else if (epi.ExceptionSpec.Type == EST_DependentNoexcept ||
+             epi.ExceptionSpec.Type == EST_DependentThrows) {
     // getFunctionTypeInternal compares noexcept expressions after the lookup,
     // so the key only needs their canonical form.
     epi.ExceptionSpec.NoexceptExpr->Profile(ID, Context, /*Canonical=*/true);

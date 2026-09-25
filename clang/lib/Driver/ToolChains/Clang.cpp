@@ -204,6 +204,14 @@ static bool addExceptionArgs(const ArgList &Args, types::ID InputType,
   // So we do not set EH to false.
   Args.AddLastArg(CmdArgs, options::OPT_fignore_exceptions);
 
+  // P0709 static exceptions are independent of dynamic exception support.
+  if (types::isCXX(InputType)) {
+    Args.addOptInFlag(CmdArgs, options::OPT_fstatic_exceptions,
+                      options::OPT_fno_static_exceptions);
+    Args.addOptInFlag(CmdArgs, options::OPT_fstatic_exceptions_propagation_hook,
+                      options::OPT_fno_static_exceptions_propagation_hook);
+  }
+
   Args.addOptInFlag(CmdArgs, options::OPT_fassume_nothrow_exception_dtor,
                     options::OPT_fno_assume_nothrow_exception_dtor);
 

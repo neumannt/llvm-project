@@ -19188,6 +19188,13 @@ void Sema::MarkFunctionReferenced(SourceLocation Loc, FunctionDecl *Func,
 
   Func->setReferenced();
 
+  // P0709: code generation needs std::error for any use of a 'throws'
+  // function, which might have been declared in an AST file.
+  if (getLangOpts().StaticExceptions && !StaticExceptionSupport)
+    if (const auto *FPT = Func->getType()->getAs<FunctionProtoType>();
+        FPT && FPT->hasStaticExceptionSpec())
+      CheckStaticExceptionSupport(Loc);
+
   // Recursive functions aren't really used until they're used from some other
   // context.
   bool IsRecursiveCall = CurContext == Func;

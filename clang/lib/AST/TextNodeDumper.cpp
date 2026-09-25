@@ -2235,6 +2235,12 @@ void TextNodeDumper::VisitFunctionProtoType(const FunctionProtoType *T) {
   case EST_Unparsed:
     OS << " exceptionspec_unparsed";
     break;
+  case EST_Throws:
+    OS << " exceptionspec_throws";
+    break;
+  case EST_DependentThrows:
+    OS << " exceptionspec_dependent_throws";
+    break;
   }
   if (!EPI.ExceptionSpec.Exceptions.empty()) {
     AddChild([=] {

@@ -3648,6 +3648,11 @@ void CXXNameMangler::mangleExtFunctionInfo(const FunctionType *T) {
   // This will get more complicated in the future if we mangle other
   // things here; but for now, since we mangle ns_returns_retained as
   // a qualifier on the result type, we can get away with this:
+
+  // A P0709 'throws' function type has a different calling convention.
+  if (T->getExtInfo().getStaticThrows())
+    mangleVendorQualifier("throws");
+
   StringRef CCQualifier = getCallingConvQualifierName(T->getExtInfo().getCC());
   if (!CCQualifier.empty())
     mangleVendorQualifier(CCQualifier);
@@ -3772,7 +3777,13 @@ void CXXNameMangler::mangleType(const FunctionProtoType *T) {
   // Mangle instantiation-dependent exception-specification, if present,
   // per cxx-abi-dev proposal on 2016-10-11.
   if (T->hasInstantiationDependentExceptionSpec()) {
-    if (isComputedNoexcept(T->getExceptionSpecType())) {
+    if (T->getExceptionSpecType() == EST_DependentThrows) {
+      // P0709 throws(expr): a vendor qualifier with the expression as its
+      // template argument.
+      Out << "U6throwsIX";
+      mangleExpression(T->getNoexceptExpr());
+      Out << "EE";
+    } else if (isComputedNoexcept(T->getExceptionSpecType())) {
       Out << "DO";
       mangleExpression(T->getNoexceptExpr());
       Out << "E";
@@ -5459,6 +5470,14 @@ recurse:
     NotPrimaryExpr();
     Out << "nx";
     mangleExpression(cast<CXXNoexceptExpr>(E)->getOperand());
+    break;
+
+  case Expr::CXXExceptModeExprClass:
+    // P0709 throws(expr): a vendor extended expression.
+    NotPrimaryExpr();
+    Out << "u6throws";
+    mangleExpression(cast<CXXExceptModeExpr>(E)->getOperand());
+    Out << "E";
     break;
 
   case Expr::UnaryExprOrTypeTraitExprClass: {

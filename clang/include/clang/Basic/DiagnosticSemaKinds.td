@@ -3378,6 +3378,10 @@ def err_musttail_callconv_mismatch : Error<
   "incompatible calling convention">;
 def note_musttail_callconv_mismatch : Note<
   "target function has calling convention %1 (expected %0)">;
+def err_musttail_static_exception_mismatch : Error<
+  "cannot perform a tail call %select{from a function declared 'throws' to a "
+  "function that is not|to a function declared 'throws' from a function that "
+  "is not}0">;
 def err_musttail_scope : Error<
   "cannot perform a tail call from this return statement">;
 def err_musttail_no_variadic : Error<
@@ -8794,6 +8798,38 @@ def warn_exception_caught_by_earlier_handler : Warning<
 def note_previous_exception_handler : Note<"for type %0">;
 def err_exceptions_disabled : Error<
   "cannot use '%0' with exceptions disabled">;
+
+// P0709 static exceptions.
+def err_static_exceptions_requires_cxx17 : Error<
+  "'throws' requires C++17 or later">;
+def err_static_exceptions_unsupported_abi : Error<
+  "'throws' is not supported for this C++ ABI">;
+def err_static_exceptions_no_std_error : Error<
+  "use of 'throws' requires a definition of 'std::error'; include <error>">;
+def err_static_exceptions_invalid_std_error : Error<
+  "'std::error' must be a trivially copyable or [[clang::trivial_abi]], "
+  "non-polymorphic class without base classes whose first member is a "
+  "pointer">;
+def err_static_exceptions_missing_helper : Error<
+  "'std::%0' is required for 'throws' but was not found; include <error>">;
+def err_static_exception_spec_override : Error<
+  "%select{function declared 'throws' cannot override a function that is "
+  "not declared 'throws'|function overriding a 'throws' function must also be "
+  "declared 'throws'}0">;
+def err_static_exception_spec_not_allowed : Error<
+  "%select{destructor|'main'|coroutine|block|deallocation function}0 cannot "
+  "be declared 'throws'">;
+def err_static_exception_condition_type : Error<
+  "condition of 'throws' must have integral or enumeration type, not %0">;
+def err_static_exception_condition_value : Error<
+  "condition of 'throws' has value %0; expected 0 (no_except), "
+  "1 (static_except) or 2 (dynamic_except)">;
+def err_static_exception_cond_virtual : Error<
+  "virtual function cannot have a conditional 'throws' specification">;
+def warn_static_exception_dynamic_throw : Warning<
+  "throwing dynamic exception of type %0 from a 'throws' function; it will be "
+  "translated to 'std::error'">, InGroup<DiagGroup<"static-exceptions-translation">>,
+  DefaultIgnore;
 def err_objc_exceptions_disabled : Error<
   "cannot use '%0' with Objective-C exceptions disabled">;
 def warn_throw_in_noexcept_func : Warning<

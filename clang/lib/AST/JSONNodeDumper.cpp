@@ -677,6 +677,10 @@ void JSONNodeDumper::VisitFunctionProtoType(const FunctionProtoType *T) {
   case EST_NoThrow:
     JOS.attribute("exceptionSpec", "nothrow");
     break;
+  case EST_Throws:
+  case EST_DependentThrows:
+    JOS.attribute("exceptionSpec", "throws");
+    break;
   // FIXME: I cannot find a way to trigger these cases while dumping the AST. I
   // suspect you can only run into them when executing an AST dump from within
   // the debugger, which is not a use case we worry about for the JSON dumping

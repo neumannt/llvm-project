@@ -4720,6 +4720,13 @@ public:
     enum { RegParmMask = 0xe00, RegParmOffset = 9 };
     enum { NoCfCheckMask = 0x1000 };
     enum { CmseNSCallMask = 0x2000 };
+    // Bit 14 is not stored in Type::FunctionTypeBitfields::ExtInfo. It is
+    // derived from the exception specification (EST_Throws) of a
+    // FunctionProtoType by FunctionType::getExtInfo(), so that the static
+    // exception calling convention reaches code generation together with the
+    // other calling convention information.
+    enum { StaticThrowsMask = 0x4000 };
+    enum { StoredBitsMask = 0x3FFF };
     uint16_t Bits = CC_C;
 
     ExtInfo(unsigned Bits) : Bits(static_cast<uint16_t>(Bits)) {}
@@ -4750,6 +4757,9 @@ public:
     bool getNoReturn() const { return Bits & NoReturnMask; }
     bool getProducesResult() const { return Bits & ProducesResultMask; }
     bool getCmseNSCall() const { return Bits & CmseNSCallMask; }
+    /// Whether this is a P0709 'throws' function, which receives a hidden
+    /// std::error out-parameter.
+    bool getStaticThrows() const { return Bits & StaticThrowsMask; }
     bool getNoCallerSavedRegs() const { return Bits & NoCallerSavedRegsMask; }
     bool getNoCfCheck() const { return Bits & NoCfCheckMask; }
     bool getHasRegParm() const { return ((Bits & RegParmMask) >> RegParmOffset) != 0; }
@@ -4794,6 +4804,15 @@ public:
         return ExtInfo(Bits & ~CmseNSCallMask);
     }
 
+    /// Note: this bit is only meaningful for code generation. It is not
+    /// stored in function types, use EST_Throws instead.
+    ExtInfo withStaticThrows(bool staticThrows) const {
+      if (staticThrows)
+        return ExtInfo(Bits | StaticThrowsMask);
+      else
+        return ExtInfo(Bits & ~StaticThrowsMask);
+    }
+
     ExtInfo withNoCallerSavedRegs(bool noCallerSavedRegs) const {
       if (noCallerSavedRegs)
         return ExtInfo(Bits | NoCallerSavedRegsMask);
@@ -4819,7 +4838,7 @@ public:
     }
 
     void Profile(llvm::FoldingSetNodeID &ID) const {
-      ID.AddInteger(Bits);
+      ID.AddInteger(Bits & StoredBitsMask);
     }
   };
 
@@ -4920,7 +4939,7 @@ protected:
   FunctionType(TypeClass tc, QualType res, QualType Canonical,
                TypeDependence Dependence, ExtInfo Info)
       : Type(tc, Canonical, Dependence), ResultType(res) {
-    FunctionTypeBits.ExtInfo = Info.Bits;
+    FunctionTypeBits.ExtInfo = Info.Bits & ExtInfo::StoredBitsMask;
   }
 
   Qualifiers getFastTypeQuals() const {
@@ -4947,7 +4966,19 @@ public:
 
   bool getCmseNSCallAttr() const { return getExtInfo().getCmseNSCall(); }
   CallingConv getCallConv() const { return getExtInfo().getCC(); }
-  ExtInfo getExtInfo() const { return ExtInfo(FunctionTypeBits.ExtInfo); }
+  ExtInfo getExtInfo() const {
+    unsigned Bits = FunctionTypeBits.ExtInfo;
+    if (getTypeClass() == FunctionProto &&
+        FunctionTypeBits.ExceptionSpecType == EST_Throws)
+      Bits |= ExtInfo::StaticThrowsMask;
+    return ExtInfo(Bits);
+  }
+
+  /// Whether this is a P0709 function declared 'throws'.
+  bool hasStaticExceptionSpec() const {
+    return getTypeClass() == FunctionProto &&
+           FunctionTypeBits.ExceptionSpecType == EST_Throws;
+  }
 
   static_assert((~Qualifiers::FastMask & Qualifiers::CVRMask) == 0,
                 "Const, volatile and restrict are assumed to be a subset of "
@@ -5622,12 +5653,14 @@ private:
     case EST_BasicNoexcept:
     case EST_Unparsed:
     case EST_NoThrow:
+    case EST_Throws:
       return {0, 0, 0};
 
     case EST_Dynamic:
       return {NumExceptions, 0, 0};
 
     case EST_DependentNoexcept:
+    case EST_DependentThrows:
     case EST_NoexceptFalse:
     case EST_NoexceptTrue:
       return {0, 1, 0};
@@ -5733,7 +5766,7 @@ public:
     Result.Type = getExceptionSpecType();
     if (Result.Type == EST_Dynamic) {
       Result.Exceptions = exceptions();
-    } else if (isComputedNoexcept(Result.Type)) {
+    } else if (hasExceptionSpecExpr(Result.Type)) {
       Result.NoexceptExpr = getNoexceptExpr();
     } else if (Result.Type == EST_Uninstantiated) {
       Result.SourceDecl = getExceptionSpecDecl();
@@ -5758,10 +5791,11 @@ public:
     return exception_begin()[i];
   }
 
-  /// Return the expression inside noexcept(expression), or a null pointer
-  /// if there is none (because the exception spec is not of this form).
+  /// Return the expression inside noexcept(expression) (or a dependent
+  /// throws(expression)), or a null pointer if there is none (because the
+  /// exception spec is not of this form).
   Expr *getNoexceptExpr() const {
-    if (!isComputedNoexcept(getExceptionSpecType()))
+    if (!hasExceptionSpecExpr(getExceptionSpecType()))
       return nullptr;
     return *getTrailingObjects<Expr *>();
   }

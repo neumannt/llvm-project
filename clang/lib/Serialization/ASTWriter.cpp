@@ -867,6 +867,7 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(EXPR_CXX_UNRESOLVED_LOOKUP);
   RECORD(EXPR_CXX_EXPRESSION_TRAIT);
   RECORD(EXPR_CXX_NOEXCEPT);
+  RECORD(EXPR_CXX_EXCEPT_MODE);
   RECORD(EXPR_OPAQUE_VALUE);
   RECORD(EXPR_BINARY_CONDITIONAL_OPERATOR);
   RECORD(EXPR_TYPE_TRAIT);
@@ -939,6 +940,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(REFERENCED_SELECTOR_POOL);
   RECORD(TU_UPDATE_LEXICAL);
   RECORD(SEMA_DECL_REFS);
+  RECORD(STATIC_EXCEPTION_DECL_REFS);
   RECORD(WEAK_UNDECLARED_IDENTIFIERS);
   RECORD(EXTNAME_UNDECLARED_IDENTIFIERS);
   RECORD(PENDING_IMPLICIT_INSTANTIATIONS);
@@ -5985,6 +5987,25 @@ void ASTWriter::WriteSpecialDeclRecords(Sema &SemaRef) {
   }
   if (!SemaDeclRefs.empty())
     Stream.EmitRecord(SEMA_DECL_REFS, SemaDeclRefs);
+
+  // Write the record containing the P0709 static exceptions support
+  // declarations, which Sema sets up on first use of 'throws'.
+  if (SemaRef.StaticExceptionSupport &&
+      wasDeclEmitted(Context.getStdErrorDecl())) {
+    RecordData StaticExceptionDeclRefs;
+    AddEmittedDeclRefOrZero(StaticExceptionDeclRefs, Context.getStdErrorDecl());
+    AddEmittedDeclRefOrZero(StaticExceptionDeclRefs,
+                            Context.getStdErrorFromCurrentExceptionDecl());
+    AddEmittedDeclRefOrZero(StaticExceptionDeclRefs,
+                            Context.getStdThrowErrorAsDynamicDecl());
+    AddEmittedDeclRefOrZero(StaticExceptionDeclRefs,
+                            Context.getStdNotifyErrorPropagationDecl());
+    AddEmittedDeclRefOrZero(StaticExceptionDeclRefs,
+                            Context.getStdErrorCopyConstructorDecl());
+    AddEmittedDeclRefOrZero(StaticExceptionDeclRefs,
+                            Context.getStdErrorMoveConstructorDecl());
+    Stream.EmitRecord(STATIC_EXCEPTION_DECL_REFS, StaticExceptionDeclRefs);
+  }
 
   // Write the record containing decls to be checked for deferred diags.
   RecordData DeclsToCheckForDeferredDiags;

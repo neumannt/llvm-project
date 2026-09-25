@@ -2026,6 +2026,7 @@ void ASTStmtWriter::VisitCXXThrowExpr(CXXThrowExpr *E) {
   Record.AddSourceLocation(E->getThrowLoc());
   Record.AddStmt(E->getSubExpr());
   Record.push_back(E->isThrownVariableInScope());
+  Record.push_back(E->isOperandConversionDeferred());
   Code = serialization::EXPR_CXX_THROW;
 }
 
@@ -2354,6 +2355,14 @@ void ASTStmtWriter::VisitCXXNoexceptExpr(CXXNoexceptExpr *E) {
   Record.AddSourceRange(E->getSourceRange());
   Record.AddStmt(E->getOperand());
   Code = serialization::EXPR_CXX_NOEXCEPT;
+}
+
+void ASTStmtWriter::VisitCXXExceptModeExpr(CXXExceptModeExpr *E) {
+  VisitExpr(E);
+  Record.push_back(E->getMode());
+  Record.AddSourceRange(E->getSourceRange());
+  Record.AddStmt(E->getOperand());
+  Code = serialization::EXPR_CXX_EXCEPT_MODE;
 }
 
 void ASTStmtWriter::VisitPackExpansionExpr(PackExpansionExpr *E) {

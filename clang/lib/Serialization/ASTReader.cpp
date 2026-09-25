@@ -4329,6 +4329,18 @@ llvm::Error ASTReader::ReadASTBlock(ModuleFile &F,
         SemaDeclRefs.push_back(ReadDeclID(F, Record, I));
       break;
 
+    case STATIC_EXCEPTION_DECL_REFS:
+      if (Record.size() != 6)
+        return llvm::createStringError(
+            std::errc::illegal_byte_sequence,
+            "Invalid STATIC_EXCEPTION_DECL_REFS block");
+      // Keep the first set of declarations, as Sema does.
+      if (!StaticExceptionDeclRefs.empty())
+        break;
+      for (unsigned I = 0, N = Record.size(); I != N; /*in loop*/)
+        StaticExceptionDeclRefs.push_back(ReadDeclID(F, Record, I));
+      break;
+
     case PPD_ENTITIES_OFFSETS: {
       F.PreprocessedEntityOffsets = (const PPEntityOffset *)Blob.data();
       assert(Blob.size() % sizeof(PPEntityOffset) == 0);
@@ -5787,6 +5799,26 @@ void ASTReader::InitializeContext() {
         cast_or_null<FunctionDecl>(GetDecl(CUDASpecialDeclRefs[1])));
     Context.setcudaLaunchDeviceDecl(
         cast_or_null<FunctionDecl>(GetDecl(CUDASpecialDeclRefs[2])));
+  }
+
+  // Restore the P0709 static exceptions support declarations. Code generation
+  // needs them for the 'throws' functions in the AST file even if this
+  // translation unit does not reference them, and it may see these functions
+  // before Sema is initialized.
+  if (!StaticExceptionDeclRefs.empty() && !Context.getStdErrorDecl()) {
+    auto Get = [&](unsigned I) -> Decl * {
+      GlobalDeclID ID = StaticExceptionDeclRefs[I];
+      return ID.isValid() ? GetDecl(ID) : nullptr;
+    };
+    Context.setStaticExceptionDecls(cast<CXXRecordDecl>(Get(0)),
+                                    cast_or_null<FunctionDecl>(Get(1)),
+                                    cast_or_null<FunctionDecl>(Get(2)));
+    Context.setStdNotifyErrorPropagationDecl(
+        cast_or_null<FunctionDecl>(Get(3)));
+    Context.setStdErrorCopyConstructorDecl(
+        cast_or_null<CXXConstructorDecl>(Get(4)));
+    Context.setStdErrorMoveConstructorDecl(
+        cast_or_null<CXXConstructorDecl>(Get(5)));
   }
 
   // Re-export any modules that were imported by a non-module AST file.
@@ -9307,6 +9339,10 @@ void ASTReader::UpdateSema() {
     }
     SemaDeclRefs.clear();
   }
+
+  // The P0709 static exceptions support was restored in InitializeContext().
+  if (SemaObj->Context.getStdErrorDecl())
+    SemaObj->StaticExceptionSupport = true;
 
   // Update the state of pragmas. Use the same API as if we had encountered the
   // pragma in the source.

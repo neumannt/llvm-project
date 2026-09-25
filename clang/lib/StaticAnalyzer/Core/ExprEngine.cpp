@@ -1132,6 +1132,7 @@ static bool shouldJustCallCheckers(const Stmt *S, VisitKind K) {
   case Stmt::DependentTemplateIdExprClass:
   case Stmt::RecoveryExprClass:
   case Stmt::CXXNoexceptExprClass:
+  case Stmt::CXXExceptModeExprClass:
   case Stmt::PackExpansionExprClass:
   case Stmt::PackIndexingExprClass:
   case Stmt::SubstNonTypeTemplateParmPackExprClass:
@@ -1991,6 +1992,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::DependentTemplateIdExprClass:
     case Stmt::RecoveryExprClass:
     case Stmt::CXXNoexceptExprClass:
+    case Stmt::CXXExceptModeExprClass:
     case Stmt::PackExpansionExprClass:
     case Stmt::PackIndexingExprClass:
     case Stmt::SubstNonTypeTemplateParmPackExprClass:

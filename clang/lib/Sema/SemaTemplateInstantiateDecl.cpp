@@ -5776,6 +5776,10 @@ TemplateDeclInstantiator::InitFunctionInstantiation(FunctionDecl *New,
         EPI.ExceptionSpec.Type != EST_None &&
         EPI.ExceptionSpec.Type != EST_DynamicNone &&
         EPI.ExceptionSpec.Type != EST_BasicNoexcept &&
+        EPI.ExceptionSpec.Type != EST_Throws &&
+        // P0709: throws(cond) determines the calling convention, instantiate
+        // it eagerly.
+        EPI.ExceptionSpec.Type != EST_DependentThrows &&
         !Tmpl->isInLocalScopeForInstantiation()) {
       FunctionDecl *ExceptionSpecTemplate = Tmpl;
       if (EPI.ExceptionSpec.Type == EST_Uninstantiated)

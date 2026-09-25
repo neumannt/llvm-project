@@ -863,6 +863,15 @@ bool Sema::checkMustTailAttr(const Stmt *St, const Attr &MTA) {
     return false;
   }
 
+  // P0709: 'throws' functions have their own calling convention.
+  if (CallerType.Func->hasStaticExceptionSpec() !=
+      CalleeType.Func->hasStaticExceptionSpec()) {
+    Diag(St->getBeginLoc(), diag::err_musttail_static_exception_mismatch)
+        << CalleeType.Func->hasStaticExceptionSpec();
+    Diag(MTA.getLocation(), diag::note_tail_call_required) << &MTA;
+    return false;
+  }
+
   if (CalleeType.Func->isVariadic() || CallerType.Func->isVariadic()) {
     Diag(St->getBeginLoc(), diag::err_musttail_no_variadic) << &MTA;
     return false;
@@ -4570,6 +4579,12 @@ void Sema::DiagnoseExceptionUse(SourceLocation Loc, bool IsTry) {
   // target region compiled for a GPU architecture.
   if (IsOpenMPGPUTarget || getLangOpts().CUDA)
     // Delay error emission for the OpenMP device code.
+    return;
+
+  // P0709: with static exceptions, try/catch can be used even if dynamic
+  // exceptions are disabled; BuildCXXThrow diagnoses throw-expressions that
+  // need dynamic exceptions.
+  if (getLangOpts().StaticExceptions)
     return;
 
   if (!getLangOpts().CXXExceptions &&

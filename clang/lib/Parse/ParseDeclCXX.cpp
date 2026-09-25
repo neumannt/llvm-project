@@ -3992,6 +3992,59 @@ ExceptionSpecificationType Parser::tryParseExceptionSpecification(
   ExceptionSpecificationType Result = EST_None;
   ExceptionSpecTokens = nullptr;
 
+  // P0709 static-exception-specification: 'throws' or 'throws(cond)'.
+  // 'throws' is a contextual keyword.
+  if (isStaticExceptionSpecKeyword(Tok)) {
+    Token StartTok = Tok;
+    SourceLocation KeywordLoc = ConsumeToken();
+    SpecificationRange = SourceRange(KeywordLoc);
+    ExceptionSpecificationType Result = EST_Throws;
+
+    if (Tok.is(tok::l_paren)) {
+      if (Delayed) {
+        // Cache the tokens, like for noexcept(expr).
+        ExceptionSpecTokens = new CachedTokens;
+        ExceptionSpecTokens->push_back(StartTok); // 'throws'
+        ExceptionSpecTokens->push_back(Tok);      // '('
+        SpecificationRange.setEnd(ConsumeParen());
+        ConsumeAndStoreUntil(tok::r_paren, *ExceptionSpecTokens,
+                             /*StopAtSemi=*/true,
+                             /*ConsumeFinalToken=*/true);
+        SpecificationRange.setEnd(ExceptionSpecTokens->back().getLocation());
+        return EST_Unparsed;
+      }
+
+      BalancedDelimiterTracker T(*this, tok::l_paren);
+      T.consumeOpen();
+      EnterExpressionEvaluationContext ConstantEvaluated(
+          Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+      NoexceptExpr = ParseConstantExpressionInExprEvalContext();
+      T.consumeClose();
+      SpecificationRange.setEnd(T.getCloseLocation());
+      if (!NoexceptExpr.isInvalid())
+        NoexceptExpr = Actions.ActOnStaticExceptionSpecCondition(
+            NoexceptExpr.get(), KeywordLoc, Result);
+      if (NoexceptExpr.isInvalid())
+        Result = EST_Throws;
+      if (Result != EST_DependentThrows)
+        NoexceptExpr = ExprResult();
+    }
+
+    if (Tok.isOneOf(tok::kw_throw, tok::kw_noexcept)) {
+      Diag(Tok, diag::err_static_exception_spec_combined);
+      // Parse and discard the other specification for recovery.
+      SourceRange Ignored;
+      ExprResult IgnoredExpr;
+      CachedTokens *IgnoredTokens = nullptr;
+      tryParseExceptionSpecification(/*Delayed=*/false, Ignored,
+                                     DynamicExceptions, DynamicExceptionRanges,
+                                     IgnoredExpr, IgnoredTokens);
+      DynamicExceptions.clear();
+      DynamicExceptionRanges.clear();
+    }
+    return Result;
+  }
+
   // Handle delayed parsing of exception-specifications.
   if (Delayed) {
     if (Tok.isNot(tok::kw_throw) && Tok.isNot(tok::kw_noexcept))
@@ -4038,8 +4091,13 @@ ExceptionSpecificationType Parser::tryParseExceptionSpecification(
   }
 
   // If there's no noexcept specification, we're done.
-  if (Tok.isNot(tok::kw_noexcept))
+  if (Tok.isNot(tok::kw_noexcept)) {
+    if (Result != EST_None && isStaticExceptionSpecKeyword(Tok)) {
+      Diag(Tok, diag::err_static_exception_spec_combined);
+      ConsumeToken();
+    }
     return Result;
+  }
 
   Diag(Tok, diag::warn_cxx98_compat_noexcept_decl);
 
@@ -4085,6 +4143,11 @@ ExceptionSpecificationType Parser::tryParseExceptionSpecification(
     }
   } else {
     Diag(Tok.getLocation(), diag::err_dynamic_and_noexcept_specification);
+  }
+
+  if (isStaticExceptionSpecKeyword(Tok)) {
+    Diag(Tok, diag::err_static_exception_spec_combined);
+    ConsumeToken();
   }
 
   return Result;

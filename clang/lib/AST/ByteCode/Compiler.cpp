@@ -3891,6 +3891,13 @@ bool Compiler<Emitter>::VisitCXXDynamicCastExpr(const CXXDynamicCastExpr *E) {
 }
 
 template <class Emitter>
+bool Compiler<Emitter>::VisitCXXExceptModeExpr(const CXXExceptModeExpr *E) {
+  if (DiscardResult)
+    return true;
+  return this->emitConst(E->getMode(), E);
+}
+
+template <class Emitter>
 bool Compiler<Emitter>::VisitCXXNoexceptExpr(const CXXNoexceptExpr *E) {
   assert(E->getType()->isBooleanType());
 

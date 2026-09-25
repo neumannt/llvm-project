@@ -832,6 +832,10 @@ public:
     return Builder.getInt1(E->getValue());
   }
 
+  Value *VisitCXXExceptModeExpr(const CXXExceptModeExpr *E) {
+    return llvm::ConstantInt::get(ConvertType(E->getType()), E->getMode());
+  }
+
   // Binary Operators.
   Value *EmitMul(const BinOpInfo &Ops) {
     if (Ops.Ty->isSignedIntegerOrEnumerationType() ||

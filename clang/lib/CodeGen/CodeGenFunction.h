@@ -375,6 +375,9 @@ public:
   CGCoroInfo CurCoro;
 
   bool isCoroutine() const { return CurCoro.Data != nullptr; }
+  /// Whether \p S is the exception handler of the current coroutine, which
+  /// calls promise.unhandled_exception().
+  bool isCoroutineExceptionHandler(const Stmt *S) const;
 
   bool inSuspendBlock() const {
     return isCoroutine() && CurCoro.InSuspendBlock;
@@ -408,6 +411,72 @@ public:
 
   /// ReturnBlock - Unified return block.
   JumpDest ReturnBlock;
+
+  //===--------------------------------------------------------------------===//
+  // P0709 static exceptions ('throws')
+  //===--------------------------------------------------------------------===//
+
+  /// A place to which a static exception (a std::error value) can be
+  /// delivered: the caller of a 'throws' function, a local handler, or (in a
+  /// function that is not 'throws') a conversion into a dynamic exception.
+  struct StaticErrorTarget {
+    /// Terminate: the error escapes a cleanup that runs while an exception
+    /// (static or dynamic) is propagated, which calls std::terminate.
+    enum KindTy { ReturnToCaller, LocalHandler, DynamicThrow, Terminate };
+    KindTy Kind = DynamicThrow;
+    /// Where the std::error value lives. A null domain pointer (the first
+    /// member of std::error) means "no error".
+    Address Slot = Address::invalid();
+    /// The block to branch to (ReturnToCaller, LocalHandler).
+    llvm::BasicBlock *Block = nullptr;
+    /// The EH stack depth of the target; all cleanups above it are run
+    /// before branching to Block.
+    EHScopeStack::stable_iterator Depth;
+    /// For LocalHandler: the try statement and the index of the handler
+    /// that receives static exceptions.
+    const CXXTryStmt *Try = nullptr;
+    unsigned HandlerIndex = 0;
+  };
+
+  /// Local static exception handlers, innermost last.
+  SmallVector<StaticErrorTarget, 2> StaticErrorHandlers;
+
+  /// Information about the handler whose body is being emitted, used for
+  /// 'throw;' in handlers that can be entered by a static exception.
+  struct StaticCatchInfo {
+    enum KindTy { CK_DynamicOnly, CK_ErrorVar, CK_CatchAll };
+    KindTy Kind = CK_DynamicOnly;
+    /// CK_ErrorVar: the catch parameter of type std::error (or reference).
+    const VarDecl *ErrorVar = nullptr;
+    /// The std::error slot of the handler and, for CK_CatchAll, the i1 flag
+    /// that is true if the handler was entered by a dynamic exception.
+    Address Slot = Address::invalid();
+    Address DynamicFlag = Address::invalid();
+    /// The cleanup that destroys the caught std::error (the catch parameter
+    /// or the slot), or stable_end() if it is trivially destructible. 'throw;'
+    /// moves the error to its target where this cleanup would run.
+    EHScopeStack::stable_iterator ErrorCleanup = EHScopeStack::stable_end();
+  };
+  SmallVector<StaticCatchInfo, 2> StaticCatchStack;
+
+  /// The implicit catch(...) that translates dynamic exceptions escaping the
+  /// body of the current 'throws' function, if any.
+  EHScopeStack::stable_iterator StaticExceptionTranslationScope =
+      EHScopeStack::stable_end();
+
+  /// The std::error out-parameter of the current function if it is
+  /// declared 'throws'.
+  Address StaticErrorOutSlot = Address::invalid();
+
+  /// A std::error temporary that receives static exceptions in functions not
+  /// declared 'throws' when there is no local handler.
+  Address StaticErrorTempSlot = Address::invalid();
+
+  /// With -fstatic-exceptions-propagation-hook: the block that calls the
+  /// propagation hook and returns; all error exits of a 'throws' function
+  /// branch to it.
+  llvm::BasicBlock *StaticErrorReturnBlock = nullptr;
+  llvm::BasicBlock *getStaticErrorReturnBlock();
 
   /// ReturnValue - The temporary alloca to hold the return
   /// value. This is invalid iff the function has no return value.
@@ -2338,6 +2407,13 @@ public:
 
   Destroyer *getDestroyer(QualType::DestructionKind destructionKind);
 
+  /// Whether EH-only cleanups, like destroying partially constructed objects,
+  /// are needed: for dynamic exceptions, or because static exceptions (P0709)
+  /// run them inline on the error path, even with -fno-exceptions.
+  bool needsEHOnlyCleanups() const {
+    return getLangOpts().Exceptions || getLangOpts().StaticExceptions;
+  }
+
   /// Determines whether an EH cleanup is required to destroy a type
   /// with the given destruction kind.
   bool needsEHCleanup(QualType::DestructionKind kind) {
@@ -2347,7 +2423,7 @@ public:
     case QualType::DK_cxx_destructor:
     case QualType::DK_objc_weak_lifetime:
     case QualType::DK_nontrivial_c_struct:
-      return getLangOpts().Exceptions;
+      return needsEHOnlyCleanups();
     case QualType::DK_objc_strong_lifetime:
       return getLangOpts().Exceptions &&
              CGM.getCodeGenOpts().ObjCAutoRefCountExceptions;
@@ -3754,6 +3830,79 @@ public:
 
   void EnterCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock = false);
   void ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock = false);
+
+  // P0709 static exceptions (CGStaticException.cpp).
+  /// Whether the current function is declared 'throws'.
+  bool isStaticThrowsFunction() const;
+  llvm::Type *getStaticErrorLLVMType();
+  CharUnits getStaticErrorAlignment();
+  Address makeStaticErrorAddress(llvm::Value *Ptr);
+  Address createStaticErrorSlot(const Twine &Name);
+  /// Load the discriminant (domain pointer) of the std::error in \p Slot.
+  llvm::Value *loadStaticErrorDomain(Address Slot);
+  /// Mark the std::error in \p Slot as "no error".
+  void clearStaticError(Address Slot);
+  /// The innermost place a static exception raised at the current point
+  /// goes to.
+  StaticErrorTarget getStaticErrorTarget();
+  /// After a call to a 'throws' function that received \p T.Slot, test for
+  /// failure and propagate the static exception.
+  void EmitStaticErrorCheck(const StaticErrorTarget &T);
+  /// Propagate the static exception stored in \p T.Slot to \p T. Leaves no
+  /// insertion point.
+  void EmitStaticErrorExit(const StaticErrorTarget &T);
+  /// Emit all active cleanups above \p Depth inline (normal and EH-only
+  /// cleanups: a static exception unwinds like a dynamic one).
+  void EmitStaticErrorCleanups(EHScopeStack::stable_iterator Depth);
+  /// Emit the active cleanups from \p From (inclusive) to \p To (exclusive)
+  /// inline.
+  void EmitStaticErrorCleanups(EHScopeStack::stable_iterator From,
+                               EHScopeStack::stable_iterator To);
+  /// Propagate the static exception in \p Src, whose destruction is the
+  /// cleanup \p SrcCleanup (or stable_end()), to \p T. The cleanups above
+  /// \p SrcCleanup run while \p Src is still intact; then \p Src is moved to
+  /// \p T instead of being destroyed. Leaves no insertion point.
+  void EmitStaticErrorMoveExit(const StaticErrorTarget &T, Address Src,
+                               EHScopeStack::stable_iterator SrcCleanup);
+  /// Whether std::error has a trivial destructor.
+  bool isStaticErrorTriviallyDestructible();
+  /// Copy-construct the std::error at \p Dest from the one at \p Src.
+  void EmitStaticErrorCopy(Address Dest, Address Src);
+  /// Move-construct the std::error at \p Dest from the one at \p Src, which
+  /// remains a valid (unspecified) error.
+  void EmitStaticErrorMove(Address Dest, Address Src);
+  /// Move the std::error at \p Src to \p Dest (std::error is trivially
+  /// relocatable). If \p ClearSource, \p Src is left with a null domain, so
+  /// that destroying it does nothing.
+  void EmitStaticErrorRelocate(Address Dest, Address Src, bool ClearSource);
+  /// Push a cleanup that destroys the std::error at \p Addr. Returns the
+  /// cleanup, or stable_end() if std::error is trivially destructible.
+  EHScopeStack::stable_iterator pushStaticErrorDestroy(Address Addr);
+  /// While emitting a cleanup on an exception path, make static exceptions
+  /// that escape it terminate the program.
+  void pushStaticErrorTerminate();
+  void popStaticErrorTerminate();
+  /// Emit a copy of the cleanup \p C at the current insertion point without
+  /// popping it (used for static exception propagation).
+  void EmitCleanupInline(EHScopeStack::stable_iterator C);
+  /// Throw the std::error in \p Slot as a dynamic exception.
+  void EmitThrowStaticErrorAsDynamic(Address Slot);
+  /// Whether \p E throws a static exception.
+  bool isStaticThrowExpr(const CXXThrowExpr *E);
+  void EmitStaticThrowExpr(const CXXThrowExpr *E);
+  /// Handle 'throw;'; returns false if this is an ordinary dynamic rethrow.
+  bool EmitStaticRethrow();
+  /// Emit handler \p C of a try statement that receives static exceptions
+  /// through \p Target.Block and dynamic ones through \p DynamicEntry (null
+  /// if unreachable), then branch to \p ContBB.
+  void EmitStaticCatchHandler(const CXXCatchStmt *C,
+                              llvm::BasicBlock *DynamicEntry,
+                              const StaticErrorTarget &Target,
+                              llvm::BasicBlock *ContBB, bool ImplicitRethrow);
+  /// In a 'throws' function, translate escaping dynamic exceptions into
+  /// std::error values.
+  EHScopeStack::stable_iterator EnterStaticExceptionTranslation();
+  void ExitStaticExceptionTranslation(EHScopeStack::stable_iterator Depth);
 
   void EmitCXXTryStmt(const CXXTryStmt &S);
   void EmitSEHTryStmt(const SEHTryStmt &S);

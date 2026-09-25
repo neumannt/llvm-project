@@ -454,7 +454,12 @@ void CodeGenFunction::EmitCXXThrowExpr(const CXXThrowExpr *E,
     EmitTrapCall(llvm::Intrinsic::trap);
     return;
   }
-  if (const Expr *SubExpr = E->getSubExpr()) {
+  if (isStaticThrowExpr(E)) {
+    // P0709: throwing a std::error from a 'throws' function.
+    EmitStaticThrowExpr(E);
+  } else if (!E->getSubExpr() && EmitStaticRethrow()) {
+    // 'throw;' in a handler that caught a static exception.
+  } else if (const Expr *SubExpr = E->getSubExpr()) {
     QualType ThrowType = SubExpr->getType();
     if (ThrowType->isObjCObjectPointerType()) {
       const Stmt *ThrowStmt = E->getSubExpr();
@@ -637,9 +642,47 @@ void CodeGenFunction::EmitCXXTryStmt(const CXXTryStmt &S) {
     ExitCXXTryStmt(S);
 }
 
+/// P0709: the index of the handler of \p S that receives static exceptions
+/// (the first catch(std::error) or catch(...)), or -1 if there is none.
+static int getStaticExceptionHandler(CodeGenFunction &CGF,
+                                     const CXXTryStmt &S) {
+  ASTContext &Ctx = CGF.getContext();
+  if (!CGF.getLangOpts().StaticExceptions || !Ctx.getStdErrorDecl())
+    return -1;
+  // Static exceptions branch directly into the handler, which is not
+  // possible with funclet-based EH.
+  if (EHPersonality::get(CGF).usesFuncletPads())
+    return -1;
+  for (unsigned I = 0, E = S.getNumHandlers(); I != E; ++I) {
+    const CXXCatchStmt *C = S.getHandler(I);
+    // The implicit catch(...) of a coroutine calls unhandled_exception(),
+    // which expects a current exception: throw static exceptions as dynamic
+    // ones instead.
+    if (CGF.isCoroutineExceptionHandler(C->getHandlerBlock()))
+      return -1;
+    if (!C->getExceptionDecl() || Ctx.isStdErrorType(C->getCaughtType()))
+      return I;
+  }
+  return -1;
+}
+
 void CodeGenFunction::EnterCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
   unsigned NumHandlers = S.getNumHandlers();
+  EHScopeStack::stable_iterator DepthBeforeTry = EHStack.stable_begin();
   EHCatchScope *CatchScope = EHStack.pushCatch(NumHandlers);
+
+  // P0709: register the local handler for static exceptions.
+  int StaticHandler = getStaticExceptionHandler(*this, S);
+  if (StaticHandler >= 0) {
+    StaticErrorTarget T;
+    T.Kind = StaticErrorTarget::LocalHandler;
+    T.Slot = createStaticErrorSlot("static.catch.slot");
+    T.Block = createBasicBlock("static.catch");
+    T.Depth = DepthBeforeTry;
+    T.Try = &S;
+    T.HandlerIndex = StaticHandler;
+    StaticErrorHandlers.push_back(T);
+  }
 
   for (unsigned I = 0; I != NumHandlers; ++I) {
     const CXXCatchStmt *C = S.getHandler(I);
@@ -1233,15 +1276,27 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
   assert(CatchScope.getNumHandlers() == NumHandlers);
   llvm::BasicBlock *DispatchBlock = CatchScope.getCachedEHDispatchBlock();
 
+  // P0709: the local handler for static exceptions, if it is used.
+  std::optional<StaticErrorTarget> StaticHandler;
+  if (!StaticErrorHandlers.empty() && StaticErrorHandlers.back().Try == &S) {
+    StaticHandler = StaticErrorHandlers.pop_back_val();
+    if (StaticHandler->Block->use_empty()) {
+      delete StaticHandler->Block;
+      StaticHandler.reset();
+    }
+  }
+  bool HasEHBranches = CatchScope.hasEHBranches();
+
   // If the catch was not required, bail out now.
-  if (!CatchScope.hasEHBranches()) {
+  if (!HasEHBranches && !StaticHandler) {
     CatchScope.clearHandlerBlocks();
     EHStack.popCatch();
     return;
   }
 
   // Emit the structure of the EH dispatch for this catch.
-  emitCatchDispatchBlock(*this, CatchScope);
+  if (HasEHBranches)
+    emitCatchDispatchBlock(*this, CatchScope);
 
   // Copy the handler blocks off before we pop the EH stack.  Emitting
   // the handlers might scribble on this memory.
@@ -1291,10 +1346,24 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
   for (unsigned I = NumHandlers; I != 0; --I) {
     HasCatchAll |= Handlers[I - 1].isCatchAll();
     llvm::BasicBlock *CatchBlock = Handlers[I-1].Block;
+    const CXXCatchStmt *C = S.getHandler(I - 1);
+
+    // Without EH branches, only static exceptions can reach a handler.
+    if (!HasEHBranches) {
+      delete CatchBlock;
+      CatchBlock = nullptr;
+    }
+    if (StaticHandler && StaticHandler->HandlerIndex == I - 1) {
+      EmitStaticCatchHandler(C, CatchBlock, *StaticHandler, ContBB,
+                             doImplicitRethrow);
+      continue;
+    }
+    if (!CatchBlock)
+      continue;
+
     EmitBlockAfterUses(CatchBlock);
 
     // Catch the exception if this isn't a catch-all.
-    const CXXCatchStmt *C = S.getHandler(I-1);
 
     // Enter a cleanup scope, including the catch variable and the
     // end-catch.
@@ -1307,7 +1376,9 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
     // Emit the PGO counter increment.
     incrementProfileCounter(C);
 
-    // Perform the body of the catch.
+    // Perform the body of the catch. 'throw;' in this handler is always an
+    // ordinary rethrow of the dynamic exception.
+    StaticCatchStack.push_back(StaticCatchInfo());
     EmitStmt(C->getHandlerBlock());
 
     // [except.handle]p11:
@@ -1324,6 +1395,7 @@ void CodeGenFunction::ExitCXXTryStmt(const CXXTryStmt &S, bool IsFnTryBlock) {
       Builder.CreateUnreachable();
       Builder.ClearInsertionPoint();
     }
+    StaticCatchStack.pop_back();
 
     // Fall out through the catch cleanups.
     CatchScope.ForceCleanup();

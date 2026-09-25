@@ -169,6 +169,11 @@ DeclarationFragments DeclarationFragments::getExceptionSpecificationString(
   case ExceptionSpecificationType::EST_DependentNoexcept:
     // FIXME: throw(conditional-expression), get expression
     break;
+  case ExceptionSpecificationType::EST_Throws:
+    return Fragments.append(" ", DeclarationFragments::FragmentKind::Text)
+        .append("throws", DeclarationFragments::FragmentKind::Keyword);
+  case ExceptionSpecificationType::EST_DependentThrows:
+    break;
   case ExceptionSpecificationType::EST_NoexceptFalse:
     return Fragments.append(" ", DeclarationFragments::FragmentKind::Text)
         .append("noexcept", DeclarationFragments::FragmentKind::Keyword)

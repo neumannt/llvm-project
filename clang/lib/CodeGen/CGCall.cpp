@@ -657,8 +657,12 @@ CodeGenTypes::arrangeUnprototypedMustTailThunk(const CXXMethodDecl *MD) {
   assert(MD->isVirtual() && "only methods have thunks");
   CanQual<FunctionProtoType> FTP = CodeGenUtils::getFormalType(MD);
   CanQualType ArgTys[] = {DeriveThisType(MD->getParent(), MD)};
+  // The thunk forwards all arguments unchanged via musttail, including the
+  // std::error out-parameter of a 'throws' function, so it must not declare
+  // that parameter itself (it would be at a different position).
   return arrangeLLVMFunctionInfo(Context.VoidTy, FnInfoOpts::None, ArgTys,
-                                 FTP->getExtInfo(), {}, RequiredArgs(1), MD);
+                                 FTP->getExtInfo().withStaticThrows(false), {},
+                                 RequiredArgs(1), MD);
 }
 
 const CGFunctionInfo &
@@ -1182,6 +1186,7 @@ CGFunctionInfo *CGFunctionInfo::create(
   FI->ReturnsRetained = info.getProducesResult();
   FI->NoCallerSavedRegs = info.getNoCallerSavedRegs();
   FI->NoCfCheck = info.getNoCfCheck();
+  FI->StaticThrows = info.getStaticThrows();
   FI->Required = required;
   FI->HasRegParm = info.getHasRegParm();
   FI->RegParm = info.getRegParm();
@@ -1876,6 +1881,7 @@ class ClangToLLVMArgMapping {
   static const unsigned InvalidIndex = ~0U;
   unsigned InallocaArgNo;
   unsigned SRetArgNo;
+  unsigned StaticErrorArgNo;
   unsigned TotalIRArgs;
 
   /// Arguments of LLVM IR function corresponding to single Clang argument.
@@ -1896,7 +1902,8 @@ class ClangToLLVMArgMapping {
 public:
   ClangToLLVMArgMapping(const ASTContext &Context, const CGFunctionInfo &FI,
                         bool OnlyRequiredArgs = false)
-      : InallocaArgNo(InvalidIndex), SRetArgNo(InvalidIndex), TotalIRArgs(0),
+      : InallocaArgNo(InvalidIndex), SRetArgNo(InvalidIndex),
+        StaticErrorArgNo(InvalidIndex), TotalIRArgs(0),
         ArgInfo(OnlyRequiredArgs ? FI.getNumRequiredArgs() : FI.arg_size()) {
     construct(Context, FI, OnlyRequiredArgs);
   }
@@ -1911,6 +1918,13 @@ public:
   unsigned getSRetArgNo() const {
     assert(hasSRetArg());
     return SRetArgNo;
+  }
+
+  /// The hidden std::error out-parameter of a P0709 'throws' function.
+  bool hasStaticErrorArg() const { return StaticErrorArgNo != InvalidIndex; }
+  unsigned getStaticErrorArgNo() const {
+    assert(hasStaticErrorArg());
+    return StaticErrorArgNo;
   }
 
   unsigned totalIRArgs() const { return TotalIRArgs; }
@@ -1949,11 +1963,22 @@ void ClangToLLVMArgMapping::construct(const ASTContext &Context,
     SRetArgNo = SwapThisWithSRet ? 1 : IRArgNo++;
   }
 
+  // The std::error out-parameter of a 'throws' function follows the required
+  // arguments, so that it is at the same position in the function definition
+  // and at (variadic) call sites.
+  unsigned NumRequiredArgs = FI.getNumRequiredArgs();
+  auto AddStaticErrorArg = [&] {
+    if (FI.hasStaticErrorParam() && StaticErrorArgNo == InvalidIndex)
+      StaticErrorArgNo = IRArgNo++;
+  };
+
   unsigned ArgNo = 0;
   unsigned NumArgs = OnlyRequiredArgs ? FI.getNumRequiredArgs() : FI.arg_size();
   for (CGFunctionInfo::const_arg_iterator I = FI.arg_begin(); ArgNo < NumArgs;
        ++I, ++ArgNo) {
     assert(I != FI.arg_end());
+    if (ArgNo == NumRequiredArgs)
+      AddStaticErrorArg();
     QualType ArgType = I->type;
     const ABIArgInfo &AI = I->info;
     // Collect data about IR arguments corresponding to Clang argument ArgNo.
@@ -2003,6 +2028,7 @@ void ClangToLLVMArgMapping::construct(const ASTContext &Context,
       IRArgNo++;
   }
   assert(ArgNo == ArgInfo.size());
+  AddStaticErrorArg();
 
   if (FI.usesInAlloca())
     InallocaArgNo = IRArgNo++;
@@ -2109,6 +2135,11 @@ llvm::FunctionType *CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
     ArgTypes[IRFunctionArgs.getSRetArgNo()] = llvm::PointerType::get(
         getLLVMContext(), FI.getReturnInfo().getIndirectAddrSpace());
   }
+
+  // Add type for the std::error out-parameter of a 'throws' function.
+  if (IRFunctionArgs.hasStaticErrorArg())
+    ArgTypes[IRFunctionArgs.getStaticErrorArgNo()] =
+        llvm::PointerType::getUnqual(getLLVMContext());
 
   // Add type for inalloca argument.
   if (IRFunctionArgs.hasInallocaArg())
@@ -2747,6 +2778,10 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
     FuncAttrs.addAttribute(llvm::Attribute::NoReturn);
   if (FI.isCmseNSCall())
     FuncAttrs.addAttribute("cmse_nonsecure_call");
+  // A P0709 'throws' function reports all failures through its std::error
+  // out-parameter; dynamic exceptions are translated before they can escape.
+  if (FI.hasStaticErrorParam())
+    FuncAttrs.addAttribute(llvm::Attribute::NoUnwind);
 
   // Collect function IR attributes from the callee prototype if we have one.
   AddAttributesFromFunctionProtoType(getContext(), FuncAttrs,
@@ -3067,6 +3102,17 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
     }
   }
 
+  // The return value of a 'throws' function is unspecified when it fails, so
+  // only keep the attributes that describe how the value is passed.
+  if (FI.hasStaticErrorParam()) {
+    for (llvm::Attribute::AttrKind Kind :
+         {llvm::Attribute::NoUndef, llvm::Attribute::NonNull,
+          llvm::Attribute::NoAlias, llvm::Attribute::Dereferenceable,
+          llvm::Attribute::DereferenceableOrNull, llvm::Attribute::Alignment,
+          llvm::Attribute::NoFPClass, llvm::Attribute::Range})
+      RetAttrs.removeAttribute(Kind);
+  }
+
   bool hasUsedSRet = false;
   SmallVector<llvm::AttrBuilder, 4> ArgAttrs;
   for (unsigned I = 0; I < IRFunctionArgs.totalIRArgs(); ++I)
@@ -3088,6 +3134,26 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
   if (IRFunctionArgs.hasInallocaArg()) {
     ArgAttrs[IRFunctionArgs.getInallocaArgNo()].addInAllocaAttr(
         FI.getArgStruct());
+  }
+
+  // The std::error out-parameter of a 'throws' function always points to a
+  // caller-owned std::error object that nothing else refers to.
+  if (IRFunctionArgs.hasStaticErrorArg()) {
+    // Like sret, the callee writes its failure through this pointer, which
+    // disables readnone and readonly.
+    AddPotentialArgAccess();
+    llvm::AttrBuilder &ErrAttrs =
+        ArgAttrs[IRFunctionArgs.getStaticErrorArgNo()];
+    ErrAttrs.addAttribute(llvm::Attribute::NoAlias);
+    ErrAttrs.addAttribute(llvm::Attribute::NonNull);
+    ErrAttrs.addAttribute(llvm::Attribute::NoUndef);
+    if (getContext().getStdErrorDecl()) {
+      QualType ErrTy = getContext().getStdErrorType();
+      ErrAttrs.addDereferenceableAttr(
+          getContext().getTypeSizeInChars(ErrTy).getQuantity());
+      ErrAttrs.addAlignmentAttr(
+          getContext().getTypeAlignInChars(ErrTy).getQuantity());
+    }
   }
 
   // Apply `nonnull`, `dereferenceable(N)` and `align N` to the `this` argument,
@@ -3404,6 +3470,10 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
   for (const llvm::AttrBuilder &Attrs : ArgAttrs)
     ArgAttrSets.push_back(llvm::AttributeSet::get(getLLVMContext(), Attrs));
 
+  // A [[noreturn]] 'throws' function still returns when it fails.
+  if (FI.hasStaticErrorParam())
+    FuncAttrs.removeAttribute(llvm::Attribute::NoReturn);
+
   AttrList = llvm::AttributeList::get(
       getLLVMContext(), llvm::AttributeSet::get(getLLVMContext(), FuncAttrs),
       llvm::AttributeSet::get(getLLVMContext(), RetAttrs), ArgAttrSets);
@@ -3502,6 +3572,14 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
   if (IRFunctionArgs.hasInallocaArg())
     ArgStruct = Address(Fn->getArg(IRFunctionArgs.getInallocaArgNo()),
                         FI.getArgStruct(), FI.getArgStructAlignment());
+
+  // Remember the std::error out-parameter of a 'throws' function; static
+  // exceptions leaving this function are stored there.
+  if (IRFunctionArgs.hasStaticErrorArg()) {
+    llvm::Value *ErrArg = Fn->getArg(IRFunctionArgs.getStaticErrorArgNo());
+    ErrArg->setName("static.error");
+    StaticErrorOutSlot = makeStaticErrorAddress(ErrArg);
+  }
 
   // Name the struct return parameter.
   if (IRFunctionArgs.hasSRetArg()) {
@@ -4370,7 +4448,8 @@ llvm::Value *CodeGenFunction::EmitCMSEClearRecord(llvm::Value *Src,
 void CodeGenFunction::EmitFunctionEpilog(
     const CGFunctionInfo &FI, bool EmitRetDbgLoc, SourceLocation EndLoc,
     uint64_t RetKeyInstructionsSourceAtom) {
-  if (FI.isNoReturn()) {
+  // A noreturn 'throws' function still returns when it fails.
+  if (FI.isNoReturn() && !FI.hasStaticErrorParam()) {
     // Noreturn functions don't return.
     EmitUnreachable(EndLoc);
     return;
@@ -6184,6 +6263,30 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
   }
 
+  // Pass a std::error slot to a 'throws' function: the one of the innermost
+  // static exception target, so that propagation needs no copying.
+  std::optional<StaticErrorTarget> StaticTarget;
+  if (IRFunctionArgs.hasStaticErrorArg()) {
+    Address ErrSlot = Address::invalid();
+    if (IsMustTail || IsVirtualFunctionPointerThunk) {
+      // The error goes directly to our caller.
+      if (StaticErrorOutSlot.isValid())
+        ErrSlot = StaticErrorOutSlot;
+      else
+        CGM.ErrorUnsupported(MustTailCall, "tail call to a 'throws' function "
+                                           "from a function without 'throws'");
+    }
+    if (!ErrSlot.isValid()) {
+      StaticTarget = getStaticErrorTarget();
+      ErrSlot = StaticTarget->Slot;
+      // Our own out-parameter is always clear while we are running.
+      if (StaticTarget->Kind != StaticErrorTarget::ReturnToCaller)
+        clearStaticError(ErrSlot);
+    }
+    IRCallArgs[IRFunctionArgs.getStaticErrorArgNo()] =
+        ErrSlot.emitRawPointer(*this);
+  }
+
   const CGCallee &ConcreteCallee = Callee.prepareConcreteCallee(*this);
   llvm::Value *CalleePtr = ConcreteCallee.getFunctionPointer();
 
@@ -6630,6 +6733,12 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
                               diag::err_musttail_noexcept_mismatch);
         break;
       }
+      // Likewise, the translation of dynamic exceptions escaping a 'throws'
+      // function is not needed when the callee is 'throws' (and nounwind).
+      if (CallInfo.hasStaticErrorParam() &&
+          StaticExceptionTranslationScope != EHScopeStack::stable_end() &&
+          EHStack.stabilize(it) == StaticExceptionTranslationScope)
+        continue;
       if (auto *Cleanup = dyn_cast<EHCleanupScope>(&*it)) {
         // Fake uses can be safely emitted immediately prior to the tail call,
         // so we choose to emit them just before the call here.
@@ -6667,6 +6776,11 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   // The stack cleanup for inalloca arguments has to run out of the normal
   // lexical order, so deactivate it and run it manually here.
   CallArgs.freeArgumentMemory(*this);
+
+  // If a 'throws' callee failed, propagate its static exception. The return
+  // value is only extracted on the success path.
+  if (StaticTarget)
+    EmitStaticErrorCheck(*StaticTarget);
 
   // Extract the return value.
   RValue Ret;

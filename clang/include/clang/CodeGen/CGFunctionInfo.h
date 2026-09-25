@@ -652,6 +652,11 @@ class CGFunctionInfo final
   LLVM_PREFERRED_TYPE(bool)
   unsigned NoCfCheck : 1;
 
+  /// Whether this is a P0709 'throws' function, which takes a hidden
+  /// std::error out-parameter.
+  LLVM_PREFERRED_TYPE(bool)
+  unsigned StaticThrows : 1;
+
   /// Log 2 of the maximum vector width.
   unsigned MaxVectorWidth : 4;
 
@@ -748,6 +753,11 @@ public:
   /// Whether this function has nocf_check attribute.
   bool isNoCfCheck() const { return NoCfCheck; }
 
+  /// Whether this is a P0709 'throws' function. Such functions take a hidden
+  /// pointer to a caller-provided std::error object, which they fill in (and
+  /// thereby make non-null) to report failure.
+  bool hasStaticErrorParam() const { return StaticThrows; }
+
   /// getASTCallingConvention() - Return the AST-specified calling
   /// convention.
   CallingConv getASTCallingConvention() const {
@@ -774,7 +784,8 @@ public:
     return FunctionType::ExtInfo(isNoReturn(), getHasRegParm(), getRegParm(),
                                  getASTCallingConvention(), isReturnsRetained(),
                                  isNoCallerSavedRegs(), isNoCfCheck(),
-                                 isCmseNSCall());
+                                 isCmseNSCall())
+        .withStaticThrows(hasStaticErrorParam());
   }
 
   CanQualType getReturnType() const { return getArgsBuffer()[0].type; }
@@ -830,6 +841,7 @@ public:
     ID.AddInteger(RegParm);
     ID.AddBoolean(NoCfCheck);
     ID.AddBoolean(CmseNSCall);
+    ID.AddBoolean(StaticThrows);
     ID.AddInteger(X86ABIAVXLevel);
     ID.AddInteger(Required.getOpaqueData());
     ID.AddBoolean(HasExtParameterInfos);
@@ -859,6 +871,7 @@ public:
     ID.AddInteger(info.getRegParm());
     ID.AddBoolean(info.getNoCfCheck());
     ID.AddBoolean(info.getCmseNSCall());
+    ID.AddBoolean(info.getStaticThrows());
     ID.AddInteger(X86ABIAVXLevel);
     ID.AddInteger(required.getOpaqueData());
     ID.AddBoolean(!paramInfos.empty());

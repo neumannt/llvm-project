@@ -969,6 +969,12 @@ private:
   /// Sema tracks a few important decls, such as namespace std, directly.
   SmallVector<GlobalDeclID, 4> SemaDeclRefs;
 
+  /// The P0709 static exceptions support declarations: std::error, the
+  /// helpers __error_from_current_exception, __throw_error_as_dynamic and
+  /// __notify_error_propagation, and the copy and move constructors of
+  /// std::error (each possibly zero).
+  SmallVector<GlobalDeclID, 6> StaticExceptionDeclRefs;
+
   /// The IDs of the types ASTContext stores directly.
   ///
   /// The AST context tracks a few important types, such as va_list, directly.

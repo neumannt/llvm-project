@@ -373,6 +373,14 @@ Retry:
     return StmtEmpty();
 
   case tok::kw_try:                 // C++ 15: try-block
+    // P0709 4.5: 'try' on a statement other than a compound statement marks
+    // it as a (potential) exception path; it has no semantic effect.
+    if (getLangOpts().StaticExceptions && NextToken().isNot(tok::l_brace)) {
+      ConsumeToken();
+      return ParseStatementOrDeclarationAfterAttributes(
+          Stmts, StmtCtx, TrailingElseLoc, CXX11Attrs, GNUAttrs,
+          PrecedingLabel);
+    }
     return ParseCXXTryBlock();
 
   case tok::kw___try:
@@ -1190,6 +1198,17 @@ StmtResult Parser::ParseCompoundStatementBody(bool isStmtExpr) {
          Tok.isNot(tok::eof)) {
     if (Tok.is(tok::annot_pragma_unused)) {
       HandlePragmaUnused();
+      continue;
+    }
+
+    // P0709 4.5: a standalone 'catch' handles everything since the '{'.
+    if (getLangOpts().StaticExceptions && Tok.is(tok::kw_catch) &&
+        !isStmtExpr) {
+      StmtResult Try = ParseStandaloneCatch(T.getOpenLocation(), Stmts);
+      Stmts.clear();
+      if (Try.isUsable())
+        Stmts.push_back(Try.get());
+      LastIsError = Try.isInvalid();
       continue;
     }
 
@@ -2719,10 +2738,53 @@ StmtResult Parser::ParseCXXTryBlockCommon(SourceLocation TryLoc, bool FnTry) {
   }
 }
 
+StmtResult Parser::ParseStandaloneCatch(SourceLocation LBraceLoc,
+                                        StmtVector &Stmts) {
+  assert(Tok.is(tok::kw_catch) && "Expected 'catch'");
+  SourceLocation CatchLoc = Tok.getLocation();
+
+  // The statements parsed so far are the try block.
+  StmtResult TryBlock = Actions.ActOnCompoundStmt(LBraceLoc, CatchLoc, Stmts,
+                                                  /*isStmtExpr=*/false);
+
+  // Like for an explicit try block, its declarations are not visible in the
+  // handlers.
+  Actions.ActOnStandaloneCatch(getCurScope(), CatchLoc);
+
+  StmtVector Handlers;
+  while (Tok.is(tok::kw_catch)) {
+    StmtResult Handler(ParseCXXCatchBlock());
+    if (!Handler.isInvalid())
+      Handlers.push_back(Handler.get());
+  }
+
+  // The handlers must end the block: nothing else is in the scope of the
+  // declarations of the implicit try block.
+  if (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof))
+    Diag(Tok, diag::err_standalone_catch_not_last);
+
+  if (TryBlock.isInvalid() || Handlers.empty())
+    return StmtError();
+  return Actions.ActOnCXXTryBlock(CatchLoc, TryBlock.get(), Handlers);
+}
+
 StmtResult Parser::ParseCXXCatchBlock(bool FnCatch) {
   assert(Tok.is(tok::kw_catch) && "Expected 'catch'");
 
   SourceLocation CatchLoc = ConsumeToken();
+
+  // P0709: 'catch { ... }' is shorthand for 'catch (std::error err) { ... }'.
+  if (getLangOpts().StaticExceptions && Tok.is(tok::l_brace)) {
+    ParseScope CatchScope(
+        this, Scope::DeclScope | Scope::ControlScope | Scope::CatchScope |
+                  (FnCatch ? Scope::FnTryCatchScope : Scope::NoScope));
+    Decl *ExceptionDecl =
+        Actions.ActOnImplicitStaticCatchParameter(getCurScope(), CatchLoc);
+    StmtResult Block(ParseCompoundStatement());
+    if (Block.isInvalid() || !ExceptionDecl)
+      return StmtError();
+    return Actions.ActOnCXXCatchBlock(CatchLoc, ExceptionDecl, Block.get());
+  }
 
   BalancedDelimiterTracker T(*this, tok::l_paren);
   if (T.expectAndConsume())

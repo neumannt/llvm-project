@@ -11,6 +11,7 @@ AutomaticReferenceCounting
 PointerAuthentication
 MatrixTypes
 CXXTypeAwareAllocators
+StaticExceptions
 ```
 
 ## Introduction

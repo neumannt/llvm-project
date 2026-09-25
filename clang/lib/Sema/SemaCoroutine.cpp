@@ -240,6 +240,12 @@ static bool isValidCoroutineContext(Sema &S, SourceLocation Loc,
   // an ellipsis that is not part of a parameter-declaration.
   if (FD->isVariadic())
     DiagInvalid(DiagVarargs);
+  // P0709: coroutines cannot use the static exception calling convention.
+  if (const auto *FPT = FD->getType()->getAs<FunctionProtoType>();
+      FPT && FPT->hasStaticExceptionSpec()) {
+    S.Diag(Loc, diag::err_static_exception_spec_not_allowed) << /*coroutine*/ 2;
+    Diagnosed = true;
+  }
 
   return !Diagnosed;
 }

@@ -2948,6 +2948,13 @@ private:
     }
   };
 
+  /// Whether \p T is the P0709 contextual keyword 'throws' (only recognized
+  /// with -fstatic-exceptions).
+  bool isStaticExceptionSpecKeyword(const Token &T) const {
+    return getLangOpts().StaticExceptions && T.is(tok::identifier) &&
+           T.getIdentifierInfo()->isStr("throws");
+  }
+
   /// Parse a C++ exception-specification if present (C++0x [except.spec]).
   ///
   /// \verbatim
@@ -7701,6 +7708,11 @@ public:
   /// \endverbatim
   ///
   StmtResult ParseCXXCatchBlock(bool FnCatch = false);
+
+  /// P0709: parse a standalone 'catch' (not preceded by 'try'); the
+  /// statements \p Stmts parsed since the '{' at \p LBraceLoc become the
+  /// try block.
+  StmtResult ParseStandaloneCatch(SourceLocation LBraceLoc, StmtVector &Stmts);
 
   //===--------------------------------------------------------------------===//
   // MS: SEH Statements and Blocks

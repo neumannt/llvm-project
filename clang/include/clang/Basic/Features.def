@@ -132,6 +132,7 @@ FEATURE(ext_vector_type_boolean, true)
 FEATURE(blocks, LangOpts.Blocks)
 FEATURE(c_thread_safety_attributes, true)
 FEATURE(cxx_exceptions, LangOpts.CXXExceptions)
+FEATURE(static_exceptions, LangOpts.StaticExceptions)
 FEATURE(cxx_rtti, LangOpts.RTTI &&LangOpts.RTTIData)
 EXTENSION(define_target_os_macros,
           PP.getPreprocessorOpts().DefineTargetOSMacros)

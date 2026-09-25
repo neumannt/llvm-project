@@ -5039,6 +5039,10 @@ static bool isCanonicalExceptionSpecification(
     const FunctionProtoType::ExceptionSpecInfo &ESI, bool NoexceptInType) {
   if (ESI.Type == EST_None)
     return true;
+  // A static exception specification changes the calling convention, so it
+  // is always part of the canonical type.
+  if (ESI.Type == EST_Throws || ESI.Type == EST_DependentThrows)
+    return true;
   if (!NoexceptInType)
     return false;
 
@@ -5092,7 +5096,7 @@ QualType ASTContext::getFunctionTypeInternal(
     // noexcept expression, or we're just looking for a canonical type.
     // Otherwise, we're going to need to create a type
     // sugar node to hold the concrete expression.
-    if (OnlyWantCanonical || !isComputedNoexcept(EPI.ExceptionSpec.Type) ||
+    if (OnlyWantCanonical || !hasExceptionSpecExpr(EPI.ExceptionSpec.Type) ||
         EPI.ExceptionSpec.NoexceptExpr == FPT->getNoexceptExpr())
       return Existing;
 
@@ -5170,6 +5174,9 @@ QualType ASTContext::getFunctionTypeInternal(
 
       case EST_DependentNoexcept:
         llvm_unreachable("dependent noexcept is already canonical");
+      case EST_Throws:
+      case EST_DependentThrows:
+        llvm_unreachable("static exception specification is canonical");
       }
     } else {
       CanonicalEPI.ExceptionSpec = FunctionProtoType::ExceptionSpecInfo();
@@ -8131,6 +8138,19 @@ QualType ASTContext::getSignatureParameterType(QualType T) const {
   T = getVariableArrayDecayedType(T);
   T = getAdjustedParameterType(T);
   return T.getUnqualifiedType();
+}
+
+QualType ASTContext::getStdErrorType() const {
+  assert(StdErrorDecl && "std::error not known");
+  return getCanonicalTagType(StdErrorDecl);
+}
+
+bool ASTContext::isStdErrorType(QualType T) const {
+  if (!StdErrorDecl || T.isNull())
+    return false;
+  T = T.getNonReferenceType();
+  const auto *RD = T->getAsCXXRecordDecl();
+  return RD && RD->getCanonicalDecl() == StdErrorDecl->getCanonicalDecl();
 }
 
 QualType ASTContext::getExceptionObjectType(QualType T) const {
@@ -14319,6 +14339,14 @@ ASTContext::mergeExceptionSpecs(FunctionProtoType::ExceptionSpecInfo ESI1,
                                 bool AcceptDependent) const {
   ExceptionSpecificationType EST1 = ESI1.Type, EST2 = ESI2.Type;
 
+  // A static exception specification is part of the calling convention and
+  // cannot be merged with anything else. Keep it, so that the conversion of
+  // the other operand fails.
+  if (EST1 == EST_Throws || EST1 == EST_DependentThrows)
+    return ESI1;
+  if (EST2 == EST_Throws || EST2 == EST_DependentThrows)
+    return ESI2;
+
   // If either of them can throw anything, that is the result.
   for (auto I : {EST_None, EST_MSAny, EST_NoexceptFalse}) {
     if (EST1 == I)
@@ -14358,6 +14386,8 @@ ASTContext::mergeExceptionSpecs(FunctionProtoType::ExceptionSpecInfo ESI1,
   case EST_NoexceptFalse:
   case EST_NoexceptTrue:
   case EST_NoThrow:
+  case EST_Throws:
+  case EST_DependentThrows:
     llvm_unreachable("These ESTs should be handled above");
 
   case EST_Dynamic: {

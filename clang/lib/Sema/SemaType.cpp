@@ -5391,7 +5391,7 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
             DynamicExceptions.push_back(FTI.Exceptions[I].Ty);
             DynamicExceptionRanges.push_back(FTI.Exceptions[I].Range);
           }
-        } else if (isComputedNoexcept(FTI.getExceptionSpecType())) {
+        } else if (hasExceptionSpecExpr(FTI.getExceptionSpecType())) {
           NoexceptExpr = FTI.NoexceptExpr;
         }
 
@@ -5402,6 +5402,20 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
                                       NoexceptExpr,
                                       Exceptions,
                                       EPI.ExceptionSpec);
+
+        // P0709: 'throws' needs std::error and changes the calling
+        // convention; blocks are not supported.
+        if (EPI.ExceptionSpec.Type == EST_Throws) {
+          if (D.getContext() == DeclaratorContext::BlockLiteral) {
+            S.Diag(FTI.getExceptionSpecLocBeg(),
+                   diag::err_static_exception_spec_not_allowed)
+                << /*block*/ 3;
+            EPI.ExceptionSpec.Type = EST_None;
+          } else if (!S.CheckStaticExceptionSupport(
+                         FTI.getExceptionSpecLocBeg())) {
+            EPI.ExceptionSpec.Type = EST_None;
+          }
+        }
 
         // FIXME: Set address space from attrs for C++ mode here.
         // OpenCLCPlusPlus: A class member function has an address space.
@@ -8345,6 +8359,7 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
       case EST_Unparsed:
       case EST_Uninstantiated:
       case EST_DependentNoexcept:
+      case EST_DependentThrows:
       case EST_Unevaluated:
         // We don't have enough information to properly determine if there is a
         // conflict, so suppress the warning.
@@ -8352,6 +8367,7 @@ static bool handleFunctionTypeAttr(TypeProcessingState &state, ParsedAttr &attr,
       case EST_Dynamic:
       case EST_MSAny:
       case EST_NoexceptFalse:
+      case EST_Throws:
         S.Diag(attr.getLoc(), diag::warn_nothrow_attribute_ignored);
         break;
       }

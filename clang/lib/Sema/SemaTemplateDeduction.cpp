@@ -1560,6 +1560,55 @@ degradeCallPartialOrderingKind(PartialOrderingKind POK) {
   return std::min(POK, PartialOrderingKind::NonCall);
 }
 
+/// P0709: deduce the template parameter \p NTTP of a conditional static
+/// exception specification throws(M) from the exception specification of the
+/// function type \p FPA: 0 (no_except), 1 (static_except) or 2
+/// (dynamic_except).
+static TemplateDeductionResult
+DeduceStaticExceptionMode(Sema &S, TemplateParameterList *TemplateParams,
+                          NonTypeOrVarTemplateParmDecl NTTP,
+                          const FunctionProtoType *FPA,
+                          TemplateDeductionInfo &Info, PartialOrderingKind POK,
+                          SmallVectorImpl<DeducedTemplateArgument> &Deduced,
+                          bool *HasDeducedAnyParam) {
+  unsigned Mode;
+  if (FPA->getExceptionSpecType() == EST_Throws) {
+    Mode = 1;
+  } else {
+    switch (FPA->canThrow()) {
+    case CT_Cannot:
+      Mode = 0;
+      break;
+    case CT_Can:
+      Mode = 2;
+      break;
+    case CT_Dependent:
+      if (FPA->getExceptionSpecType() == EST_DependentThrows)
+        return DeduceNonTypeTemplateArgument(
+            S, TemplateParams, NTTP, FPA->getNoexceptExpr(), Info,
+            POK != PartialOrderingKind::None, Deduced, HasDeducedAnyParam);
+      // Can't deduce anything from noexcept(expr) or throw(T...).
+      return TemplateDeductionResult::Success;
+    }
+  }
+
+  // Deduce a value of the type of the parameter if it is known, else of type
+  // std::except_t.
+  QualType ValueType = NTTP.getType().getNonReferenceType();
+  if (ValueType->isDependentType() || !ValueType->isIntegralOrEnumerationType())
+    ValueType = S.getStdExceptTType(Info.getLocation());
+  ValueType = ValueType.getUnqualifiedType();
+  // A bool can only select between no_except and static_except.
+  if (ValueType->isBooleanType() && Mode > 1)
+    return TemplateDeductionResult::NonDeducedMismatch;
+  // We give M in throws(M) the "deduced from array bound" treatment, as for
+  // noexcept(M).
+  return DeduceNonTypeTemplateArgument(
+      S, TemplateParams, NTTP, S.Context.MakeIntValue(Mode, ValueType),
+      ValueType, /*DeducedFromArrayBound=*/true, Info,
+      POK != PartialOrderingKind::None, Deduced, HasDeducedAnyParam);
+}
+
 /// Deduce the template arguments by comparing the parameter type and
 /// the argument type (C++ [temp.deduct.type]).
 ///
@@ -2065,6 +2114,10 @@ static TemplateDeductionResult DeduceTemplateArgumentsByTypeMatch(
         assert(NTTP.getDepth() == Info.getDeducedDepth() &&
                "saw non-type template parameter with wrong depth");
 
+        if (FPP->getExceptionSpecType() == EST_DependentThrows)
+          return DeduceStaticExceptionMode(S, TemplateParams, NTTP, FPA, Info,
+                                           POK, Deduced, HasDeducedAnyParam);
+
         llvm::APSInt Noexcept(1);
         switch (FPA->canThrow()) {
         case CT_Cannot:
@@ -2080,7 +2133,12 @@ static TemplateDeductionResult DeduceTemplateArgumentsByTypeMatch(
               POK != PartialOrderingKind::None, Deduced, HasDeducedAnyParam);
 
         case CT_Dependent:
-          if (Expr *ArgNoexceptExpr = FPA->getNoexceptExpr())
+          // The expression of a dependent throws(expr) is not a noexcept
+          // condition.
+          if (Expr *ArgNoexceptExpr =
+                  FPA->getExceptionSpecType() == EST_DependentNoexcept
+                      ? FPA->getNoexceptExpr()
+                      : nullptr)
             return DeduceNonTypeTemplateArgument(
                 S, TemplateParams, NTTP, ArgNoexceptExpr, Info,
                 POK != PartialOrderingKind::None, Deduced, HasDeducedAnyParam);

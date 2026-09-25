@@ -1221,10 +1221,12 @@ public:
   // \p Operand is the expression in the throw statement, and can be
   // null if not present.
   CXXThrowExpr(Expr *Operand, QualType Ty, SourceLocation Loc,
-               bool IsThrownVariableInScope)
+               bool IsThrownVariableInScope,
+               bool IsOperandConversionDeferred = false)
       : Expr(CXXThrowExprClass, Ty, VK_PRValue, OK_Ordinary), Operand(Operand) {
     CXXThrowExprBits.ThrowLoc = Loc;
     CXXThrowExprBits.IsThrownVariableInScope = IsThrownVariableInScope;
+    CXXThrowExprBits.IsOperandConversionDeferred = IsOperandConversionDeferred;
     setDependence(computeDependence(this));
   }
   CXXThrowExpr(EmptyShell Empty) : Expr(CXXThrowExprClass, Empty) {}
@@ -1241,6 +1243,14 @@ public:
   /// this variable.
   bool isThrownVariableInScope() const {
     return CXXThrowExprBits.IsThrownVariableInScope;
+  }
+
+  /// P0709: whether the operand has not been converted to the exception
+  /// object yet, because the throw-expression is in a function with a
+  /// dependent 'throws(cond)' and thus might throw a static exception. Such
+  /// a throw-expression is rebuilt on instantiation.
+  bool isOperandConversionDeferred() const {
+    return CXXThrowExprBits.IsOperandConversionDeferred;
   }
 
   SourceLocation getBeginLoc() const { return getThrowLoc(); }
@@ -4386,6 +4396,56 @@ public:
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() == CXXNoexceptExprClass;
+  }
+
+  // Iterators
+  child_range children() { return child_range(&Operand, &Operand + 1); }
+
+  const_child_range children() const {
+    return const_child_range(&Operand, &Operand + 1);
+  }
+};
+
+/// Represents the P0709 'throws(expr)' operator, which yields how an
+/// expression reports failure: no_except (0), static_except (1) or
+/// dynamic_except (2), the enumerators of std::except_t. Like the noexcept
+/// operator, its operand is unevaluated.
+class CXXExceptModeExpr : public Expr {
+  friend class ASTStmtReader;
+
+  Stmt *Operand;
+  SourceRange Range;
+  unsigned Mode;
+
+public:
+  enum ModeKind : unsigned {
+    NoExcept = 0,
+    StaticExcept = 1,
+    DynamicExcept = 2
+  };
+
+  CXXExceptModeExpr(QualType Ty, Expr *Operand, unsigned Mode,
+                    bool ValueDependent, SourceLocation Keyword,
+                    SourceLocation RParen)
+      : Expr(CXXExceptModeExprClass, Ty, VK_PRValue, OK_Ordinary),
+        Operand(Operand), Range(Keyword, RParen), Mode(Mode) {
+    setDependence(computeDependence(this, ValueDependent));
+  }
+
+  explicit CXXExceptModeExpr(EmptyShell Empty)
+      : Expr(CXXExceptModeExprClass, Empty), Mode(0) {}
+
+  Expr *getOperand() const { return static_cast<Expr *>(Operand); }
+
+  /// The value of the operator (a ModeKind); meaningless if value-dependent.
+  unsigned getMode() const { return Mode; }
+
+  SourceLocation getBeginLoc() const { return Range.getBegin(); }
+  SourceLocation getEndLoc() const { return Range.getEnd(); }
+  SourceRange getSourceRange() const { return Range; }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == CXXExceptModeExprClass;
   }
 
   // Iterators

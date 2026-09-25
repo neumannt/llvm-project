@@ -208,6 +208,7 @@ public:
   bool VisitCXXReinterpretCastExpr(const CXXReinterpretCastExpr *E);
   bool VisitCXXDynamicCastExpr(const CXXDynamicCastExpr *E);
   bool VisitCXXNoexceptExpr(const CXXNoexceptExpr *E);
+  bool VisitCXXExceptModeExpr(const CXXExceptModeExpr *E);
   bool VisitCXXConstructExpr(const CXXConstructExpr *E);
   bool VisitSourceLocExpr(const SourceLocExpr *E);
   bool VisitOffsetOfExpr(const OffsetOfExpr *E);

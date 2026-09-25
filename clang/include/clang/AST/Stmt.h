@@ -860,6 +860,11 @@ protected:
     LLVM_PREFERRED_TYPE(bool)
     unsigned IsThrownVariableInScope : 1;
 
+    /// P0709: whether the conversion of the operand was deferred to template
+    /// instantiation.
+    LLVM_PREFERRED_TYPE(bool)
+    unsigned IsOperandConversionDeferred : 1;
+
     /// The location of the "throw".
     SourceLocation ThrowLoc;
   };

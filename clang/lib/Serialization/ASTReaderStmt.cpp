@@ -1972,6 +1972,7 @@ void ASTStmtReader::VisitCXXThrowExpr(CXXThrowExpr *E) {
   E->CXXThrowExprBits.ThrowLoc = readSourceLocation();
   E->Operand = Record.readSubExpr();
   E->CXXThrowExprBits.IsThrownVariableInScope = Record.readInt();
+  E->CXXThrowExprBits.IsOperandConversionDeferred = Record.readInt();
 }
 
 void ASTStmtReader::VisitCXXDefaultArgExpr(CXXDefaultArgExpr *E) {
@@ -2281,6 +2282,13 @@ void ASTStmtReader::VisitExpressionTraitExpr(ExpressionTraitExpr *E) {
 void ASTStmtReader::VisitCXXNoexceptExpr(CXXNoexceptExpr *E) {
   VisitExpr(E);
   E->CXXNoexceptExprBits.Value = Record.readInt();
+  E->Range = readSourceRange();
+  E->Operand = Record.readSubExpr();
+}
+
+void ASTStmtReader::VisitCXXExceptModeExpr(CXXExceptModeExpr *E) {
+  VisitExpr(E);
+  E->Mode = Record.readInt();
   E->Range = readSourceRange();
   E->Operand = Record.readSubExpr();
 }
@@ -4496,6 +4504,10 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
 
     case EXPR_CXX_NOEXCEPT:
       S = new (Context) CXXNoexceptExpr(Empty);
+      break;
+
+    case EXPR_CXX_EXCEPT_MODE:
+      S = new (Context) CXXExceptModeExpr(Empty);
       break;
 
     case EXPR_PACK_EXPANSION:

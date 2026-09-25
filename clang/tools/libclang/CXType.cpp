@@ -821,6 +821,10 @@ getExternalExceptionSpecificationKind(ExceptionSpecificationType EST) {
     return CXCursor_ExceptionSpecificationKind_Uninstantiated;
   case EST_Unparsed:
     return CXCursor_ExceptionSpecificationKind_Unparsed;
+  case EST_Throws:
+  case EST_DependentThrows:
+    // P0709 static exceptions have no libclang representation yet.
+    return CXCursor_ExceptionSpecificationKind_None;
   }
   llvm_unreachable("invalid EST value");
 }

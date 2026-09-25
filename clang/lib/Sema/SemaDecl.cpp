@@ -12444,6 +12444,9 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
   NamedDecl *OldDecl = nullptr;
   bool MayNeedOverloadableChecks = false;
 
+  if (getLangOpts().StaticExceptions)
+    CheckStaticExceptionFunctionDecl(NewFD);
+
   inferLifetimeCaptureByAttribute(NewFD);
   // Merge or overload the declaration with an existing declaration of
   // the same name, if appropriate.

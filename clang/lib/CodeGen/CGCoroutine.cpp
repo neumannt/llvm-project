@@ -908,6 +908,10 @@ static void emitBodyAndFallthrough(CodeGenFunction &CGF,
       CGF.EmitStmt(OnFallthrough);
 }
 
+bool CodeGenFunction::isCoroutineExceptionHandler(const Stmt *S) const {
+  return isCoroutine() && S && S == CurCoro.Data->ExceptionHandler;
+}
+
 void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
   auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
   auto &TI = CGM.getContext().getTargetInfo();

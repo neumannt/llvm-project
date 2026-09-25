@@ -381,7 +381,7 @@ bool Sema::CheckEquivalentExceptionSpec(FunctionDecl *Old, FunctionDecl *New) {
 
   // For dependent noexcept, we can't just take the expression from the old
   // prototype. It likely contains references to the old prototype's parameters.
-  if (ESI.Type == EST_DependentNoexcept) {
+  if (ESI.Type == EST_DependentNoexcept || ESI.Type == EST_DependentThrows) {
     New->setInvalidDecl();
   } else {
     // Update the type of the function with the appropriate exception
@@ -451,6 +451,14 @@ bool Sema::CheckEquivalentExceptionSpec(FunctionDecl *Old, FunctionDecl *New) {
     break;
   case EST_NoThrow:
     OS <<"__attribute__((nothrow))";
+    break;
+  case EST_Throws:
+    OS << "throws";
+    break;
+  case EST_DependentThrows:
+    OS << "throws(";
+    OldProto->getNoexceptExpr()->printPretty(OS, nullptr, getPrintingPolicy());
+    OS << ")";
     break;
   case EST_None:
   case EST_MSAny:
@@ -555,6 +563,26 @@ static bool CheckEquivalentExceptionSpecImpl(
   assert(!isUnresolvedExceptionSpec(OldEST) &&
          !isUnresolvedExceptionSpec(NewEST) &&
          "Shouldn't see unknown exception specifications here");
+
+  // P0709: a static exception specification changes the calling convention,
+  // so all declarations must agree on it exactly.
+  if (OldEST == EST_DependentThrows && NewEST == EST_DependentThrows) {
+    llvm::FoldingSetNodeID OldFSN, NewFSN;
+    Old->getNoexceptExpr()->Profile(OldFSN, S.Context, true);
+    New->getNoexceptExpr()->Profile(NewFSN, S.Context, true);
+    if (OldFSN == NewFSN)
+      return false;
+  }
+  if (OldEST == EST_Throws || NewEST == EST_Throws ||
+      OldEST == EST_DependentThrows || NewEST == EST_DependentThrows) {
+    if (OldEST == NewEST && OldEST == EST_Throws)
+      return false;
+    if (DiagID.getDiagID() != 0)
+      S.Diag(NewLoc, DiagID);
+    if (NoteID.getDiagID() != 0 && OldLoc.isValid())
+      S.Diag(OldLoc, NoteID);
+    return true;
+  }
 
   CanThrowResult OldCanThrow = Old->canThrow();
   CanThrowResult NewCanThrow = New->canThrow();
@@ -792,7 +820,8 @@ bool Sema::CheckExceptionSpecSubset(
   // with the equivalency check, this is safe in this case, because we don't
   // want to merge declarations. Checks after instantiation will catch any
   // omissions we make here.
-  if (SuperEST == EST_DependentNoexcept || SubEST == EST_DependentNoexcept)
+  if (SuperEST == EST_DependentNoexcept || SubEST == EST_DependentNoexcept ||
+      SuperEST == EST_DependentThrows || SubEST == EST_DependentThrows)
     return false;
 
   CanThrowResult SuperCanThrow = Superset->canThrow();
@@ -962,6 +991,21 @@ bool Sema::CheckOverridingFunctionExceptionSpec(const CXXMethodDecl *New,
   if (isa<CXXDestructorDecl>(New) && New->getParent()->isDependentType())
     return false;
 
+  // P0709: 'throws' is part of the calling convention of the virtual
+  // function, so an override must agree with the overridden function.
+  if (!exceptionSpecNotKnownYet(Old) && !exceptionSpecNotKnownYet(New)) {
+    bool OldThrows =
+        Old->getType()->castAs<FunctionProtoType>()->hasStaticExceptionSpec();
+    bool NewThrows =
+        New->getType()->castAs<FunctionProtoType>()->hasStaticExceptionSpec();
+    if (OldThrows != NewThrows) {
+      Diag(New->getLocation(), diag::err_static_exception_spec_override)
+          << OldThrows;
+      Diag(Old->getLocation(), diag::note_overridden_virtual_function);
+      return true;
+    }
+  }
+
   // If the old exception specification hasn't been parsed yet, or the new
   // exception specification can't be computed yet, remember that we need to
   // perform this check when we get to the end of the outermost
@@ -1047,6 +1091,11 @@ CanThrowResult Sema::canCalleeThrow(Sema &S, const Expr *E, const Decl *D,
     FT = S.ResolveExceptionSpec(Loc.isInvalid() ? E->getBeginLoc() : Loc, FT);
   if (!FT)
     return CT_Can;
+
+  // For the 'throws(expr)' operator: does expr throw anything other than
+  // static exceptions?
+  if (S.CanThrowIgnoresStaticExceptions && FT->hasStaticExceptionSpec())
+    return CT_Cannot;
 
   return FT->canThrow();
 }
@@ -1395,6 +1444,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Expr::TypeTraitExprClass:
   case Expr::CXXBoolLiteralExprClass:
   case Expr::CXXNoexceptExprClass:
+  case Expr::CXXExceptModeExprClass:
   case Expr::CXXNullPtrLiteralExprClass:
   case Expr::CXXPseudoDestructorExprClass:
   case Expr::CXXReflectExprClass:

@@ -641,6 +641,10 @@ def note_missing_end_of_definition_before : Note<
 def ext_ellipsis_exception_spec : Extension<
   "exception specification of '...' is a Microsoft extension">,
   InGroup<MicrosoftExceptionSpec>;
+def err_standalone_catch_not_last : Error<
+  "a standalone 'catch' must be at the end of its block">;
+def err_static_exception_spec_combined : Error<
+  "'throws' cannot be combined with another exception specification">;
 def err_dynamic_and_noexcept_specification : Error<
   "cannot have both throw() and noexcept() clause on the same function">;
 def err_except_spec_unparsed : Error<

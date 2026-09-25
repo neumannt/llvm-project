@@ -669,6 +669,7 @@ namespace clang {
     ExpectedStmt VisitOffsetOfExpr(OffsetOfExpr *OE);
     ExpectedStmt VisitCXXThrowExpr(CXXThrowExpr *E);
     ExpectedStmt VisitCXXNoexceptExpr(CXXNoexceptExpr *E);
+    ExpectedStmt VisitCXXExceptModeExpr(CXXExceptModeExpr *E);
     ExpectedStmt VisitCXXDefaultArgExpr(CXXDefaultArgExpr *E);
     ExpectedStmt VisitCXXScalarValueInitExpr(CXXScalarValueInitExpr *E);
     ExpectedStmt VisitCXXBindTemporaryExpr(CXXBindTemporaryExpr *E);
@@ -8417,6 +8418,20 @@ ExpectedStmt ASTNodeImporter::VisitCXXNoexceptExpr(CXXNoexceptExpr *E) {
       ToType, ToOperand, ToCanThrow, ToBeginLoc, ToEndLoc);
 }
 
+ExpectedStmt ASTNodeImporter::VisitCXXExceptModeExpr(CXXExceptModeExpr *E) {
+  Error Err = Error::success();
+  auto ToType = importChecked(Err, E->getType());
+  auto ToOperand = importChecked(Err, E->getOperand());
+  auto ToBeginLoc = importChecked(Err, E->getBeginLoc());
+  auto ToEndLoc = importChecked(Err, E->getEndLoc());
+  if (Err)
+    return std::move(Err);
+
+  return new (Importer.getToContext())
+      CXXExceptModeExpr(ToType, ToOperand, E->getMode(), E->isValueDependent(),
+                        ToBeginLoc, ToEndLoc);
+}
+
 ExpectedStmt ASTNodeImporter::VisitCXXThrowExpr(CXXThrowExpr *E) {
   Error Err = Error::success();
   auto ToSubExpr = importChecked(Err, E->getSubExpr());
@@ -8426,7 +8441,8 @@ ExpectedStmt ASTNodeImporter::VisitCXXThrowExpr(CXXThrowExpr *E) {
     return std::move(Err);
 
   return new (Importer.getToContext()) CXXThrowExpr(
-      ToSubExpr, ToType, ToThrowLoc, E->isThrownVariableInScope());
+      ToSubExpr, ToType, ToThrowLoc, E->isThrownVariableInScope(),
+      E->isOperandConversionDeferred());
 }
 
 ExpectedStmt ASTNodeImporter::VisitCXXDefaultArgExpr(CXXDefaultArgExpr *E) {
