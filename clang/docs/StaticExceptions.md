@@ -193,15 +193,44 @@ single call site for this. Without the flag there is no overhead.
 
 ## Implementation notes
 
-- ABI: a `throws` function takes a hidden parameter, a pointer to a
-  caller-owned `std::error` object, which follows the fixed parameters. To
-  fail, the function stores the error there and returns (its return value is
-  then unspecified). The caller tests the domain pointer after the call. A
-  `throws` function forwards its own error pointer to the `throws` functions
-  it calls, so propagation needs no copying. P0709 lists this
-  "out-parameter" strategy as one of the two alternatives to prototype; the
-  other one, returning the error in registers with a flag discriminant, would
-  need backend support.
+- ABI: P0709 lists two strategies to prototype, and
+  `-fstatic-exceptions-abi=` selects between them. All translation units of a
+  program must use the same setting; it is not part of the mangling.
+
+  - `pointer`: a `throws` function takes a hidden parameter, a
+    pointer to a caller-owned `std::error` object, which follows the fixed
+    parameters. To fail, the function stores the error there and returns (its
+    return value is then unspecified). The caller tests the domain pointer
+    after the call. A `throws` function forwards its own error pointer to the
+    `throws` functions it calls, so propagation needs no copying.
+  - `register` (the default) and `carry`: a `throws` function returns either its value or
+    the error in registers, plus a flag that tells which. The integer and
+    pointer parts of the return value share the first integer return
+    registers with the error (a union); floating-point and vector parts keep
+    their registers, and values returned in memory still are (through a
+    pointer that is not marked `sret`, as the return registers are in use).
+    For example, on x86-64 `int f() throws` returns the value or the error in
+    RAX:RDX and `double g() throws` returns the value in XMM0 or the error in
+    RAX:RDX. With `register`, the flag is returned in the next integer return
+    register (RCX on x86-64, X2 on AArch64); the caller tests it after the
+    call. With `carry` (x86 only), the flag is returned in the carry flag, as
+    suggested by P0709: the callee returns with `clc` or `stc` and the caller
+    branches with `jc`. Forwarding the result of a `throws` call remains a
+    tail call. In the IR, the function returns a struct whose last element is
+    the `i1` flag; `carry` adds the `"x86-carry-flag-return"` function
+    attribute, which tells the x86 backend to return that element in CF.
+    Right before instruction selection, the x86 backend duplicates the
+    (merged) return blocks of such functions so that the flag is a constant
+    for each `ret` where possible. `carry` is an experiment and not supported
+    where the epilogue clobbers EFLAGS: on Win64 (which must deallocate the
+    stack with `add` when there is no frame pointer) and with
+    `-fzero-call-used-regs` (which clears registers with `xor`).
+
+  With every ABI, `return f(...);` in a `throws` function, where `f` is a
+  `throws` function with the same return type, returns the result of `f`
+  as is (success or error) if no cleanups have to run and no local handler or
+  propagation hook is involved, so that the call becomes a tail call.
+  `p0709-examples/abi-bench.sh` compares the three ABIs.
 - `throws` functions and calls to them are `nounwind`. Dynamic exceptions are
   caught by an implicit catch-all around the function body, which is only
   emitted if something in the function can throw dynamically.
@@ -212,6 +241,11 @@ single call site for this. Without the flag there is no overhead.
 
 - Only the Itanium C++ ABI with landing-pad based EH is supported (not MSVC,
   WebAssembly or other funclet-based EH).
+- With `-fstatic-exceptions-abi=register` or `carry`, error returns bypass
+  the function exit instrumentation (`-finstrument-functions`), and
+  `std::error` must be two words in size. Virtual member function pointer
+  thunks (with pointer authentication) of `throws` functions are not
+  supported.
 - `throws` functions are `nounwind`, so forced unwinding (e.g. thread
   cancellation with `pthread_exit` or `pthread_cancel`) cannot pass through
   them, just like through `noexcept` functions: it aborts the program.

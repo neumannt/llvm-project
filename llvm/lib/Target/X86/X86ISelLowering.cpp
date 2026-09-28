@@ -57916,6 +57916,40 @@ static SDValue combineBT(SDNode *N, SelectionDAG &DAG,
   if (SDValue V = combineBTToBitOpFlag(N, DAG))
     return V;
 
+  // Setting the carry flag to bit 0 (e.g. to return a value in the carry flag,
+  // see X86::CarryFlagReturnAttr).
+  if (isNullConstant(N1)) {
+    SDValue Src = N->getOperand(0);
+    while (Src.getOpcode() == ISD::ANY_EXTEND ||
+           Src.getOpcode() == ISD::ZERO_EXTEND ||
+           Src.getOpcode() == ISD::TRUNCATE)
+      Src = Src.getOperand(0);
+    EVT VT = Src.getValueType();
+    SDLoc DL(N);
+    // bt (srl X, C), 0 --> bt X, C
+    auto *Amt = Src.getOpcode() == ISD::SRL
+                    ? dyn_cast<ConstantSDNode>(Src.getOperand(1))
+                    : nullptr;
+    if (Amt) {
+      SDValue X = Src.getOperand(0);
+      EVT XVT = X.getValueType();
+      if ((XVT == MVT::i16 || XVT == MVT::i32 || XVT == MVT::i64) &&
+          Amt->getZExtValue() < XVT.getSizeInBits())
+        return DAG.getNode(X86ISD::BT, DL, MVT::i32, X,
+                           DAG.getConstant(Amt->getZExtValue(), DL, XVT));
+    }
+    // bt X, 0 --> neg X, if X is 0 or 1 (no extension is needed). Constants
+    // are selected as stc/clc.
+    if (!isa<ConstantSDNode>(Src) &&
+        (VT == MVT::i8 || VT == MVT::i16 || VT == MVT::i32 || VT == MVT::i64) &&
+        DAG.computeKnownBits(Src).countMinLeadingZeros() >=
+            VT.getSizeInBits() - 1)
+      return DAG
+          .getNode(X86ISD::SUB, DL, DAG.getVTList(VT, MVT::i32),
+                   DAG.getConstant(0, DL, VT), Src)
+          .getValue(1);
+  }
+
   return SDValue();
 }
 

@@ -94,6 +94,7 @@ RValue CodeGenFunction::EmitCXXMemberOrOperatorCall(
   auto &FnInfo = CGM.getTypes().arrangeCXXMethodCall(
       Args, FPT, CallInfo.ReqArgs, CallInfo.PrefixSize,
       getCurrentFunctionDecl());
+  markStaticErrorForwardCall(CE);
   return EmitCall(FnInfo, Callee, ReturnValue, Args, CallOrInvoke,
                   CE && CE == MustTailCall,
                   CE ? CE->getExprLoc() : SourceLocation());
@@ -494,6 +495,7 @@ CodeGenFunction::EmitCXXMemberPointerCallExpr(const CXXMemberCallExpr *E,
 
   // And the rest of the call args
   EmitCallArgs(Args, FPT, E->arguments());
+  markStaticErrorForwardCall(E);
   return EmitCall(CGM.getTypes().arrangeCXXMethodCall(Args, FPT, required,
                                                       /*PrefixSize=*/0,
                                                       getCurrentFunctionDecl()),

@@ -295,11 +295,13 @@ private:
                            MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
                            int Offset) const;
 
-  /// Adjusts the stack pointer using LEA, SUB, or ADD.
+  /// Adjusts the stack pointer using LEA, SUB, or ADD. Outside of the
+  /// epilogue, \p PreserveFlags forces an adjustment that keeps EFLAGS.
   MachineInstrBuilder BuildStackAdjustment(MachineBasicBlock &MBB,
                                            MachineBasicBlock::iterator MBBI,
                                            const DebugLoc &DL, int64_t Offset,
-                                           bool InEpilogue) const;
+                                           bool InEpilogue,
+                                           bool PreserveFlags = false) const;
 
   unsigned getPSPSlotOffsetFromSP(const MachineFunction &MF) const;
 

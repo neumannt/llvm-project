@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s
+// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fstatic-exceptions-abi=pointer -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s
 
 // A std::error that is not trivially copyable, but trivially relocatable
 // ([[clang::trivial_abi]]), e.g. because it owns a wrapped dynamic exception.

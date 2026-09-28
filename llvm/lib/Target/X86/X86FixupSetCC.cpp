@@ -95,7 +95,9 @@ static bool fixupSetCC(MachineFunction &MF) {
       if (!ZExt)
         continue;
 
-      if (!FlagsDefMI)
+      // A call only defines eflags if it returns a value in the carry flag;
+      // don't make a register live across the call for that.
+      if (!FlagsDefMI || FlagsDefMI->isCall())
         continue;
 
       // When ZU is available and not disabled by tuning, we rewrite to

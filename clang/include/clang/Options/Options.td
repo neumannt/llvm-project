@@ -2335,6 +2335,17 @@ defm static_exceptions_propagation_hook
                           "whenever a 'throws' function exits with an error">,
                   NegFlag<SetFalse>>,
       ShouldParseIf<cplusplus.KeyPath>;
+def fstatic_exceptions_abi_EQ : Joined<["-"], "fstatic-exceptions-abi=">,
+  Group<f_Group>, Visibility<[ClangOption, CC1Option]>,
+  HelpText<"How 'throws' functions report errors: in the return registers "
+           "with the failure flag in another register ('register', the "
+           "default) or in the carry flag ('carry', x86 except Win64), or through a "
+           "hidden pointer argument ('pointer')">,
+  Values<"pointer,register,carry">,
+  NormalizedValuesScope<"LangOptions::StaticExceptionsABIKind">,
+  NormalizedValues<["Pointer", "Register", "Carry"]>,
+  MarshallingInfoEnum<LangOpts<"StaticExceptionsABI">, "Register">,
+  ShouldParseIf<cplusplus.KeyPath>;
 defm async_exceptions: BoolFOption<"async-exceptions",
   LangOpts<"EHAsynch">, DefaultFalse,
   PosFlag<SetTrue, [], [ClangOption, CC1Option],

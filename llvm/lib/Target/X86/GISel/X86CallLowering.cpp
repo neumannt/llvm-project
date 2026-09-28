@@ -150,6 +150,9 @@ bool X86CallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
   assert(((Val && !VRegs.empty()) || (!Val && VRegs.empty())) &&
          "Return value without a vreg");
   MachineFunction &MF = MIRBuilder.getMF();
+  // Values returned in the carry flag are handled by SelectionDAG.
+  if (MF.getFunction().hasFnAttribute(X86::CarryFlagReturnAttr))
+    return false;
   auto MIB = MIRBuilder.buildInstrNoInsert(X86::RET).addImm(0);
   auto FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
   const auto &STI = MF.getSubtarget<X86Subtarget>();
@@ -332,6 +335,10 @@ bool X86CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
   // Handle only Linux C, X86_64_SysV calling conventions for now.
   if (!STI.isTargetLinux() || !(Info.CallConv == CallingConv::C ||
                                 Info.CallConv == CallingConv::X86_64_SysV))
+    return false;
+
+  // Results returned in the carry flag are handled by SelectionDAG.
+  if (Info.CB && Info.CB->hasFnAttr(X86::CarryFlagReturnAttr))
     return false;
 
   unsigned AdjStackDown = TII.getCallFrameSetupOpcode();

@@ -362,7 +362,8 @@ void X86FrameLowering::emitSPUpdate(MachineBasicBlock &MBB,
 
 MachineInstrBuilder X86FrameLowering::BuildStackAdjustment(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
-    const DebugLoc &DL, int64_t Offset, bool InEpilogue) const {
+    const DebugLoc &DL, int64_t Offset, bool InEpilogue,
+    bool PreserveFlags) const {
   assert(Offset != 0 && "zero offset stack adjustment requested");
 
   // On Atom, using LEA to adjust SP is preferred, but using it in the epilogue
@@ -373,7 +374,7 @@ MachineInstrBuilder X86FrameLowering::BuildStackAdjustment(
     // of MBB would require to use LEA operations.
     // We need to use LEA operations if EFLAGS is live in, because
     // it means an instruction will read it before it gets defined.
-    UseLEA = STI.useLeaForSP() || MBB.isLiveIn(X86::EFLAGS);
+    UseLEA = STI.useLeaForSP() || MBB.isLiveIn(X86::EFLAGS) || PreserveFlags;
   } else {
     // If we can use LEA for SP but we shouldn't, check that none
     // of the terminators uses the eflags. Otherwise we will insert
@@ -4040,6 +4041,10 @@ MachineBasicBlock::iterator X86FrameLowering::eliminateCallFramePseudoInstr(
   DebugLoc DL = I->getDebugLoc(); // copy DebugLoc as I will be erased.
   uint64_t Amount = TII.getFrameSize(*I);
   uint64_t InternalAmt = (isDestroy || Amount) ? TII.getFrameAdjustment(*I) : 0;
+  // A call frame destroy without an EFLAGS definition must preserve the flags
+  // that the call returns (see AdjustInstrPostInstrSelection).
+  bool PreserveFlags =
+      isDestroy && !I->definesRegister(X86::EFLAGS, /*TRI=*/nullptr);
   I = MBB.erase(I);
   auto InsertPos = skipDebugInstructionsForward(I, MBB.end());
 
@@ -4116,7 +4121,7 @@ MachineBasicBlock::iterator X86FrameLowering::eliminateCallFramePseudoInstr(
         if (!(F.hasMinSize() &&
               adjustStackWithPops(MBB, InsertPos, DL, StackAdjustment)))
           BuildStackAdjustment(MBB, InsertPos, DL, StackAdjustment,
-                               /*InEpilogue=*/false);
+                               /*InEpilogue=*/false, PreserveFlags);
       }
     }
 
@@ -4143,7 +4148,8 @@ MachineBasicBlock::iterator X86FrameLowering::eliminateCallFramePseudoInstr(
     MachineBasicBlock::iterator B = MBB.begin();
     while (CI != B && !std::prev(CI)->isCall())
       --CI;
-    BuildStackAdjustment(MBB, CI, DL, -InternalAmt, /*InEpilogue=*/false);
+    BuildStackAdjustment(MBB, CI, DL, -InternalAmt, /*InEpilogue=*/false,
+                         PreserveFlags);
   }
 
   return I;

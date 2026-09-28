@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,EH
-// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,NOEH
+// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fstatic-exceptions-abi=pointer -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,EH
+// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fstatic-exceptions-abi=pointer -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,NOEH
 
 // Code generation for the P0709 static exceptions prototype ('throws').
 

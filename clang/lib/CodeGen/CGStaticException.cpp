@@ -25,6 +25,13 @@
 // caller is a plain forward branch; all cleanups (including EH-only ones like
 // destroying partially constructed objects) are emitted inline on that path.
 //
+// With -fstatic-exceptions-abi=register or carry, a 'throws' function instead
+// returns either its value or the error in the return registers, plus a flag
+// that tells which (see StaticErrorReturnLayout). Inside the function, errors
+// still go through a std::error slot: a local that is returned from the error
+// return block. After a call, the caller tests the flag and stores the error
+// to the slot of the target.
+//
 // Dynamic exceptions that escape the body of a 'throws' function are caught
 // by an implicit catch(...) and translated with
 // std::__error_from_current_exception. Hence 'throws' functions are nounwind
@@ -36,6 +43,7 @@
 #include "CGCXXABI.h"
 #include "CGCleanup.h"
 #include "CodeGenFunction.h"
+#include "CodeGenModule.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/CodeGen/CGFunctionInfo.h"
 #include "llvm/IR/MDBuilder.h"
@@ -142,33 +150,307 @@ CodeGenFunction::pushStaticErrorDestroy(Address Addr) {
   return EHStack.stable_begin();
 }
 
+//===----------------------------------------------------------------------===//
+// Returning errors in registers
+//===----------------------------------------------------------------------===//
+
+StaticErrorReturnLayout
+CodeGen::computeStaticErrorReturnLayout(llvm::Type *ValueTy,
+                                        const llvm::DataLayout &DL) {
+  StaticErrorReturnLayout L;
+  L.ValueType = ValueTy;
+  llvm::LLVMContext &Ctx = ValueTy->getContext();
+  unsigned WordBits = DL.getPointerSizeInBits();
+  llvm::Type *WordTy = llvm::IntegerType::get(Ctx, WordBits);
+
+  // Split the value into its scalar parts.
+  SmallVector<unsigned, 2> Path;
+  auto Flatten = [&](auto &Self, llvm::Type *Ty) -> void {
+    if (auto *ST = dyn_cast<llvm::StructType>(Ty)) {
+      for (unsigned I = 0, E = ST->getNumElements(); I != E; ++I) {
+        Path.push_back(I);
+        Self(Self, ST->getElementType(I));
+        Path.pop_back();
+      }
+      return;
+    }
+    if (auto *AT = dyn_cast<llvm::ArrayType>(Ty)) {
+      for (unsigned I = 0, E = AT->getNumElements(); I != E; ++I) {
+        Path.push_back(I);
+        Self(Self, AT->getElementType());
+        Path.pop_back();
+      }
+      return;
+    }
+    StaticErrorReturnLayout::Part P;
+    P.Path = Path;
+    P.Ty = Ty;
+    P.Field = 0;
+    P.NumWords = 0;
+    L.Parts.push_back(P);
+  };
+  if (!ValueTy->isVoidTy())
+    Flatten(Flatten, ValueTy);
+
+  // Integers and pointers go into words, everything else into fields of
+  // their own. Pointers in other address spaces are not converted to and from
+  // words, as the std::error's domain pointer is in the default one.
+  SmallVector<llvm::Type *, 4> Words, Others;
+  for (StaticErrorReturnLayout::Part &P : L.Parts) {
+    bool IsWordPtr = P.Ty->isPointerTy() &&
+                     P.Ty->getPointerAddressSpace() == 0 &&
+                     DL.getTypeSizeInBits(P.Ty) == WordBits;
+    if (!IsWordPtr && !P.Ty->isIntegerTy()) {
+      P.Field = Others.size();
+      Others.push_back(P.Ty);
+      continue;
+    }
+    P.Field = Words.size();
+    P.NumWords =
+        IsWordPtr ? 1 : llvm::divideCeil(P.Ty->getIntegerBitWidth(), WordBits);
+    if (IsWordPtr || P.Ty == WordTy)
+      Words.push_back(P.Ty);
+    else
+      Words.append(P.NumWords, WordTy);
+  }
+  // Room for the std::error.
+  while (Words.size() < 2)
+    Words.push_back(WordTy);
+  for (StaticErrorReturnLayout::Part &P : L.Parts)
+    if (!P.NumWords)
+      P.Field += Words.size();
+
+  SmallVector<llvm::Type *, 8> Fields(Words.begin(), Words.end());
+  Fields.append(Others);
+  L.FlagField = Fields.size();
+  Fields.push_back(llvm::Type::getInt1Ty(Ctx));
+  L.Type = llvm::StructType::get(Ctx, Fields);
+  return L;
+}
+
+/// Convert \p V (an integer of at most word size or a pointer) to the word
+/// type \p WordTy.
+static llvm::Value *toWord(CGBuilderTy &B, llvm::Value *V, llvm::Type *WordTy) {
+  if (V->getType() == WordTy)
+    return V;
+  if (WordTy->isPointerTy())
+    return B.CreateIntToPtr(V, WordTy);
+  if (V->getType()->isPointerTy())
+    return B.CreatePtrToInt(V, WordTy);
+  return B.CreateZExt(V, WordTy);
+}
+
+/// The inverse of toWord.
+static llvm::Value *fromWord(CGBuilderTy &B, llvm::Value *W, llvm::Type *Ty) {
+  if (W->getType() == Ty)
+    return W;
+  if (Ty->isPointerTy())
+    return B.CreateIntToPtr(W, Ty);
+  if (W->getType()->isPointerTy())
+    return B.CreatePtrToInt(W, Ty);
+  return B.CreateTrunc(W, Ty);
+}
+
+/// The address of the value member of the std::error in \p Slot, which
+/// follows the domain pointer.
+static Address getStaticErrorValueAddress(CodeGenFunction &CGF, Address Slot) {
+  return CGF.Builder
+      .CreateConstInBoundsByteGEP(Slot.withElementType(CGF.Int8Ty),
+                                  CGF.getPointerSize())
+      .withElementType(CGF.IntPtrTy);
+}
+
+/// Check that std::error is two words, as the register ABI assumes.
+static bool checkStaticErrorLayout(CodeGenFunction &CGF) {
+  ASTContext &Ctx = CGF.getContext();
+  if (Ctx.getStdErrorDecl() &&
+      Ctx.getTypeSizeInChars(Ctx.getStdErrorType()) == 2 * CGF.getPointerSize())
+    return true;
+  CGF.CGM.ErrorUnsupported(CGF.CurFuncDecl,
+                           "returning a std::error that is not two words in "
+                           "registers");
+  return false;
+}
+
+llvm::Value *
+CodeGenFunction::EmitStaticSuccessReturnValue(const CGFunctionInfo &FI,
+                                              llvm::Value *RV) {
+  const StaticErrorReturnLayout &L =
+      CGM.getTypes().getStaticErrorReturnLayout(FI);
+  llvm::Value *Ret = llvm::PoisonValue::get(L.Type);
+  if (RV) {
+    assert(RV->getType() == L.ValueType && "unexpected return value");
+    for (const StaticErrorReturnLayout::Part &P : L.Parts) {
+      llvm::Value *V =
+          P.Path.empty() ? RV : Builder.CreateExtractValue(RV, P.Path);
+      if (!P.NumWords) {
+        Ret = Builder.CreateInsertValue(Ret, V, P.Field);
+        continue;
+      }
+      if (P.NumWords == 1) {
+        Ret = Builder.CreateInsertValue(
+            Ret, toWord(Builder, V, L.Type->getElementType(P.Field)), P.Field);
+        continue;
+      }
+      // An integer that is wider than a word.
+      llvm::Type *WideTy = llvm::IntegerType::get(
+          getLLVMContext(), P.NumWords * IntPtrTy->getBitWidth());
+      V = Builder.CreateZExt(V, WideTy);
+      for (unsigned I = 0; I != P.NumWords; ++I)
+        Ret = Builder.CreateInsertValue(
+            Ret,
+            Builder.CreateTrunc(
+                Builder.CreateLShr(V, I * IntPtrTy->getBitWidth()), IntPtrTy),
+            P.Field + I);
+    }
+  }
+  return Builder.CreateInsertValue(Ret, Builder.getFalse(), L.FlagField);
+}
+
+/// Return the error in the current function's slot.
+static void emitStaticErrorReturn(CodeGenFunction &CGF) {
+  CGBuilderTy &B = CGF.Builder;
+  const StaticErrorReturnLayout &L =
+      CGF.CGM.getTypes().getStaticErrorReturnLayout(*CGF.CurFnInfo);
+  llvm::Value *Ret = llvm::PoisonValue::get(L.Type);
+  if (checkStaticErrorLayout(CGF)) {
+    Address Slot = CGF.StaticErrorOutSlot;
+    llvm::Value *Domain = CGF.loadStaticErrorDomain(Slot);
+    llvm::Value *Value = B.CreateLoad(getStaticErrorValueAddress(CGF, Slot),
+                                      "static.error.value");
+    Ret = B.CreateInsertValue(Ret, toWord(B, Domain, L.Type->getElementType(0)),
+                              0);
+    Ret = B.CreateInsertValue(Ret, toWord(B, Value, L.Type->getElementType(1)),
+                              1);
+  }
+  B.CreateRet(B.CreateInsertValue(Ret, B.getTrue(), L.FlagField));
+}
+
+llvm::Value *CodeGenFunction::EmitStaticErrorCallResult(
+    const CGFunctionInfo &FI, llvm::Value *Result, const StaticErrorTarget &T) {
+  const StaticErrorReturnLayout &L =
+      CGM.getTypes().getStaticErrorReturnLayout(FI);
+  if (!HaveInsertPoint())
+    return L.ValueType->isVoidTy() ? nullptr
+                                   : llvm::PoisonValue::get(L.ValueType);
+
+  llvm::Value *Failed =
+      Builder.CreateExtractValue(Result, L.FlagField, "static.failed");
+  llvm::BasicBlock *ErrorBB = createBasicBlock("static.unwind");
+  llvm::BasicBlock *ContBB = createBasicBlock("static.cont");
+  // Errors are exceptional.
+  Builder.CreateCondBr(
+      Failed, ErrorBB, ContBB,
+      llvm::MDBuilder(getLLVMContext()).createUnlikelyBranchWeights());
+
+  EmitBlock(ErrorBB);
+  if (checkStaticErrorLayout(*this)) {
+    Builder.CreateStore(
+        fromWord(Builder, Builder.CreateExtractValue(Result, 0), Int8PtrTy),
+        T.Slot.withElementType(Int8PtrTy));
+    Builder.CreateStore(
+        fromWord(Builder, Builder.CreateExtractValue(Result, 1), IntPtrTy),
+        getStaticErrorValueAddress(*this, T.Slot));
+  }
+  EmitStaticErrorExit(T);
+  EmitBlock(ContBB);
+
+  if (L.ValueType->isVoidTy())
+    return nullptr;
+  llvm::Value *V = llvm::PoisonValue::get(L.ValueType);
+  for (const StaticErrorReturnLayout::Part &P : L.Parts) {
+    llvm::Value *PartV;
+    if (!P.NumWords) {
+      PartV = Builder.CreateExtractValue(Result, P.Field);
+    } else if (P.NumWords == 1) {
+      PartV =
+          fromWord(Builder, Builder.CreateExtractValue(Result, P.Field), P.Ty);
+    } else {
+      // An integer that is wider than a word.
+      unsigned WordBits = IntPtrTy->getBitWidth();
+      llvm::Type *WideTy =
+          llvm::IntegerType::get(getLLVMContext(), P.NumWords * WordBits);
+      PartV = llvm::ConstantInt::get(WideTy, 0);
+      for (unsigned I = 0; I != P.NumWords; ++I)
+        PartV = Builder.CreateOr(
+            PartV,
+            Builder.CreateShl(
+                Builder.CreateZExt(
+                    Builder.CreateExtractValue(Result, P.Field + I), WideTy),
+                I * WordBits));
+      PartV = Builder.CreateTrunc(PartV, P.Ty);
+    }
+    if (P.Path.empty())
+      return PartV;
+    V = Builder.CreateInsertValue(V, PartV, P.Path);
+  }
+  return V;
+}
+
+bool CodeGenFunction::canForwardStaticErrorResult(
+    const CGFunctionInfo &CalleeInfo, llvm::Type *CalleeRetTy) {
+  if (!isStaticThrowsFunction() || !CalleeInfo.hasStaticErrorParam() ||
+      !StaticErrorOutSlot.isValid())
+    return false;
+  // The error must go to our caller, without calling the propagation hook.
+  if (!StaticErrorHandlers.empty() ||
+      getLangOpts().StaticExceptionsPropagationHook ||
+      ShouldInstrumentFunction())
+    return false;
+  // The result must be returned the same way (the caller checked that the
+  // types are the same).
+  if (CurFn->getReturnType() != CalleeRetTy ||
+      CurFnInfo->getReturnInfo().getKind() !=
+          CalleeInfo.getReturnInfo().getKind() ||
+      CurFnInfo->getEffectiveCallingConvention() !=
+          CalleeInfo.getEffectiveCallingConvention())
+    return false;
+  // No cleanups may run between the call and the return.
+  for (EHScopeStack::iterator I = EHStack.begin(),
+                              E = EHStack.find(PrologueCleanupDepth);
+       I != E; ++I) {
+    auto *Scope = dyn_cast<EHCleanupScope>(&*I);
+    if (Scope && (Scope->isActive() || Scope->getActiveFlag().isValid()))
+      return false;
+  }
+  return true;
+}
+
 llvm::BasicBlock *CodeGenFunction::getStaticErrorReturnBlock() {
   FunctionDecl *Hook = getContext().getStdNotifyErrorPropagationDecl();
   // A thunk only forwards the error of the function it calls, which already
   // called the hook.
-  if (!Hook || !getLangOpts().StaticExceptionsPropagationHook ||
-      CurFuncIsThunk)
+  bool UseHook =
+      Hook && getLangOpts().StaticExceptionsPropagationHook && !CurFuncIsThunk;
+  bool InRegisters = CGM.getTypes().returnsStaticErrorInRegisters(*CurFnInfo);
+  if (!UseHook && !InRegisters)
     return ReturnBlock.getBlock();
   if (StaticErrorReturnBlock)
     return StaticErrorReturnBlock;
 
-  // P0709 4.4: one shared exit that calls the hook with the error.
+  // One shared exit that calls the hook with the error (P0709 4.4) and/or
+  // returns the error in registers.
   StaticErrorReturnBlock = createBasicBlock("static.error.return");
   CGBuilderTy::InsertPoint SavedIP = Builder.saveAndClearIP();
   CurFn->insert(CurFn->end(), StaticErrorReturnBlock);
   Builder.SetInsertPoint(StaticErrorReturnBlock);
-  CallArgList Args;
-  Args.add(RValue::get(StaticErrorOutSlot, *this),
-           getContext().getLValueReferenceType(
-               getContext().getStdErrorType().withConst()));
-  const CGFunctionInfo &FnInfo =
-      CGM.getTypes().arrangeFunctionDeclaration(Hook);
-  llvm::Constant *Fn = CGM.GetAddrOfFunction(Hook);
-  llvm::CallBase *Call;
-  EmitCall(FnInfo, CGCallee::forDirect(Fn, GlobalDecl(Hook)), ReturnValueSlot(),
-           Args, &Call);
-  Call->setDoesNotThrow();
-  Builder.CreateBr(ReturnBlock.getBlock());
+  if (UseHook) {
+    CallArgList Args;
+    Args.add(RValue::get(StaticErrorOutSlot, *this),
+             getContext().getLValueReferenceType(
+                 getContext().getStdErrorType().withConst()));
+    const CGFunctionInfo &FnInfo =
+        CGM.getTypes().arrangeFunctionDeclaration(Hook);
+    llvm::Constant *Fn = CGM.GetAddrOfFunction(Hook);
+    llvm::CallBase *Call;
+    EmitCall(FnInfo, CGCallee::forDirect(Fn, GlobalDecl(Hook)),
+             ReturnValueSlot(), Args, &Call);
+    Call->setDoesNotThrow();
+  }
+  if (InRegisters)
+    emitStaticErrorReturn(*this);
+  else
+    Builder.CreateBr(ReturnBlock.getBlock());
   Builder.restoreIP(SavedIP);
   return StaticErrorReturnBlock;
 }

@@ -1025,6 +1025,21 @@ def STC : I<0xF9, RawFrm, (outs), (ins), "stc", []>;
 def CMC : I<0xF5, RawFrm, (outs), (ins), "cmc", []>;
 }
 
+// Variants of CLC and STC for code generation that do not depend on the
+// previous value of EFLAGS. They are used to return a value in the carry flag
+// (see X86::CarryFlagReturnAttr); the other flags are undefined afterwards.
+let SchedRW = [WriteALU], Defs = [EFLAGS], hasSideEffects = 0,
+    isCodeGenOnly = 1 in {
+def CLC_DEF : I<0xF8, RawFrm, (outs), (ins), "clc", []>;
+def STC_DEF : I<0xF9, RawFrm, (outs), (ins), "stc", []>;
+}
+
+// Testing bit 0 of a constant only sets the carry flag.
+def imm_bit0_clear : ImmLeaf<i32, [{ return !(Imm & 1); }]>;
+def imm_bit0_set : ImmLeaf<i32, [{ return Imm & 1; }]>;
+def : Pat<(X86bt imm_bit0_clear, (i32 0)), (CLC_DEF)>;
+def : Pat<(X86bt imm_bit0_set, (i32 0)), (STC_DEF)>;
+
 // DF management instructions.
 let SchedRW = [WriteALU], Defs = [DF] in {
 def CLD : I<0xFC, RawFrm, (outs), (ins), "cld", []>;

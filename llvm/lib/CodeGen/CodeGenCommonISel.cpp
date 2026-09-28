@@ -71,7 +71,8 @@ StackProtectorDescriptor::addSuccessorMBB(
 /// terminator instructors so we can satisfy ABI constraints. A partial
 /// terminator sequence is an improper subset of a terminator sequence (i.e. it
 /// may be the whole terminator sequence).
-static bool MIIsInTerminatorSequence(const MachineInstr &MI) {
+static bool MIIsInTerminatorSequence(const MachineInstr &MI,
+                                     const MachineInstr &Term) {
   // If we do not have a copy or an implicit def, we return true if and only if
   // MI is a debug value.
   if (!MI.isCopy() && !MI.isImplicitDef()) {
@@ -81,6 +82,24 @@ static bool MIIsInTerminatorSequence(const MachineInstr &MI) {
     // sequence, so we return true in that case.
     if (MI.isDebugInstr())
       return true;
+
+    // An instruction that only sets physical registers that the terminator
+    // reads, e.g. a flag that is returned in a status register (as with the
+    // X86 "x86-carry-flag-return" attribute).
+    if (MI.getDesc().getNumDefs() == 0 && !MI.mayLoadOrStore() &&
+        !MI.hasUnmodeledSideEffects() && !MI.isCall()) {
+      bool DefinesTermUse = false;
+      for (const MachineOperand &MO : MI.operands()) {
+        if (!MO.isReg() || !MO.isDef())
+          continue;
+        if (!MO.getReg().isPhysical() || MO.isDead() ||
+            !Term.readsRegister(MO.getReg(), /*TRI=*/nullptr))
+          return false;
+        DefinesTermUse = true;
+      }
+      if (DefinesTermUse)
+        return true;
+    }
 
     // For GlobalISel, we may have extension instructions for arguments within
     // copy sequences. Allow these.
@@ -184,7 +203,7 @@ llvm::findSplitPointForStackProtector(MachineBasicBlock *BB,
     return Previous;
   }
 
-  while (MIIsInTerminatorSequence(*Previous)) {
+  while (MIIsInTerminatorSequence(*Previous, *BB->getFirstTerminator())) {
     SplitPoint = Previous;
     if (Previous == Start)
       break;

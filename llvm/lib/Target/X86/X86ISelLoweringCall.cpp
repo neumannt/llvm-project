@@ -778,14 +778,54 @@ static void Passv64i1ArgInRegs(
   RegsToPass.push_back(std::make_pair(NextVA.getLocReg(), Hi));
 }
 
+/// Whether the last of the return values \p Args is returned in the carry flag
+/// (see X86::CarryFlagReturnAttr).
+template <typename ArgT>
+static bool isCarryFlagReturn(bool HasAttr, const SmallVectorImpl<ArgT> &Args) {
+  return HasAttr && !Args.empty() && Args.back().ArgVT == MVT::i1;
+}
+
+/// Set the carry flag to bit 0 of \p Val; returns the EFLAGS value. For a
+/// constant, this is selected as STC or CLC.
+static SDValue emitCarryFlag(SDValue Val, const SDLoc &dl, SelectionDAG &DAG) {
+  Val = DAG.getNode(ISD::ANY_EXTEND, dl, MVT::i32, Val);
+  return DAG.getNode(X86ISD::BT, dl, MVT::i32, Val,
+                     DAG.getConstant(0, dl, MVT::i32));
+}
+
 SDValue
 X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
                                bool isVarArg,
-                               const SmallVectorImpl<ISD::OutputArg> &Outs,
+                               const SmallVectorImpl<ISD::OutputArg> &AllOuts,
                                const SmallVectorImpl<SDValue> &OutVals,
                                const SDLoc &dl, SelectionDAG &DAG) const {
   MachineFunction &MF = DAG.getMachineFunction();
   X86MachineFunctionInfo *FuncInfo = MF.getInfo<X86MachineFunctionInfo>();
+
+  // A value returned in the carry flag is not assigned a register.
+  SmallVector<ISD::OutputArg, 8> OutsWithoutCarry;
+  const SmallVectorImpl<ISD::OutputArg> *OutsPtr = &AllOuts;
+  SDValue CarryVal;
+  if (isCarryFlagReturn(
+          MF.getFunction().hasFnAttribute(X86::CarryFlagReturnAttr), AllOuts)) {
+    OutsWithoutCarry.append(AllOuts.begin(), std::prev(AllOuts.end()));
+    OutsPtr = &OutsWithoutCarry;
+    CarryVal = OutVals[AllOuts.size() - 1];
+    // The epilogue must not clobber the flag. Win64 epilogues without a frame
+    // pointer must use ADD to deallocate the stack, and clearing registers
+    // uses XOR, so neither is supported.
+    const Function &F = MF.getFunction();
+    if (MF.getTarget().getMCAsmInfo().usesWindowsCFI()) {
+      errorUnsupported(DAG, dl, "carry flag return on Win64");
+      CarryVal = SDValue();
+    } else if (F.hasFnAttribute("zero-call-used-regs") &&
+               F.getFnAttribute("zero-call-used-regs").getValueAsString() !=
+                   "skip") {
+      errorUnsupported(DAG, dl, "carry flag return with zero-call-used-regs");
+      CarryVal = SDValue();
+    }
+  }
+  const SmallVectorImpl<ISD::OutputArg> &Outs = *OutsPtr;
 
   // In some cases we need to disable registers from the default CSR list.
   // For example, when they are used as return registers (preserve_* and X86's
@@ -961,6 +1001,14 @@ X86TargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
         CallConv != CallingConv::PreserveAll &&
         CallConv != CallingConv::PreserveMost)
       MF.getRegInfo().disableCalleeSavedRegister(RetValReg);
+  }
+
+  // Set the carry flag last: the copies above do not affect EFLAGS.
+  if (CarryVal) {
+    Chain = DAG.getCopyToReg(Chain, dl, X86::EFLAGS,
+                             emitCarryFlag(CarryVal, dl, DAG), Glue);
+    Glue = Chain.getValue(1);
+    RetOps.push_back(DAG.getRegister(X86::EFLAGS, MVT::i32));
   }
 
   const X86RegisterInfo *TRI = Subtarget.getRegisterInfo();
@@ -1143,14 +1191,44 @@ static SDValue getPopFromX87Reg(SelectionDAG &DAG, SDValue Chain,
                      ArrayRef(Ops, Glue.getNode() ? 3 : 2));
 }
 
+void X86TargetLowering::AdjustInstrPostInstrSelection(MachineInstr &MI,
+                                                      SDNode *Node) const {
+  assert((MI.getOpcode() == X86::ADJCALLSTACKUP32 ||
+          MI.getOpcode() == X86::ADJCALLSTACKUP64) &&
+         "unexpected instruction with a post-isel hook");
+  // If the call returns a value in the carry flag (see LowerCallResult), the
+  // flags are read after the call frame destroy. Pretend that it does not
+  // clobber them, which frame lowering then ensures.
+  if (!Node)
+    return;
+  for (SDNode *G = Node->getGluedUser(); G; G = G->getGluedUser()) {
+    if (G->getOpcode() == ISD::CopyFromReg &&
+        cast<RegisterSDNode>(G->getOperand(1))->getReg() == X86::EFLAGS) {
+      int Idx = MI.findRegisterDefOperandIdx(X86::EFLAGS, /*TRI=*/nullptr);
+      if (Idx >= 0)
+        MI.removeOperand(Idx);
+      return;
+    }
+  }
+}
+
 /// Lower the result values of a call into the
 /// appropriate copies out of appropriate physical registers.
 ///
 SDValue X86TargetLowering::LowerCallResult(
     SDValue Chain, SDValue InGlue, CallingConv::ID CallConv, bool isVarArg,
-    const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
-    SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals,
-    uint32_t *RegMask) const {
+    const SmallVectorImpl<ISD::InputArg> &AllIns, const SDLoc &dl,
+    SelectionDAG &DAG, SmallVectorImpl<SDValue> &InVals, uint32_t *RegMask,
+    bool CarryFlagResult) const {
+
+  // A value returned in the carry flag is not assigned a register.
+  SmallVector<ISD::InputArg, 8> InsWithoutCarry;
+  const SmallVectorImpl<ISD::InputArg> *InsPtr = &AllIns;
+  if (CarryFlagResult) {
+    InsWithoutCarry.append(AllIns.begin(), std::prev(AllIns.end()));
+    InsPtr = &InsWithoutCarry;
+  }
+  const SmallVectorImpl<ISD::InputArg> &Ins = *InsPtr;
 
   const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
   // Assign locations to each value returned by this call.
@@ -1237,6 +1315,17 @@ SDValue X86TargetLowering::LowerCallResult(
       Val = DAG.getBitcast(VA.getValVT(), Val);
 
     InVals.push_back(Val);
+  }
+
+  // The last result is the carry flag, which the callee set right before
+  // returning.
+  if (CarryFlagResult) {
+    SDValue Flags =
+        DAG.getCopyFromReg(Chain, dl, X86::EFLAGS, MVT::i32, InGlue);
+    Chain = Flags.getValue(1);
+    InVals.push_back(
+        DAG.getNode(X86ISD::SETCC, dl, MVT::i8,
+                    DAG.getTargetConstant(X86::COND_B, dl, MVT::i8), Flags));
   }
 
   return Chain;
@@ -2161,6 +2250,15 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // sibling calls to avoid unnecessary argument copies.
   bool IsMustTail = CLI.CB && CLI.CB->isMustTailCall();
   bool IsSibcall = false;
+
+  // A tail call must not change whether the last result is returned in the
+  // carry flag.
+  bool CarryFlagResult =
+      isCarryFlagReturn(CB && CB->hasFnAttr(X86::CarryFlagReturnAttr), Ins);
+  if (isTailCall && CarryFlagResult != MF.getFunction().hasFnAttribute(
+                                           X86::CarryFlagReturnAttr))
+    isTailCall = false;
+
   if (isTailCall) {
     IsSibcall = isEligibleForSiblingCallOpt(CLI, CCInfo, ArgLocs);
     isTailCall = IsSibcall || IsMustTail || ShouldGuaranteeTCO;
@@ -2790,7 +2888,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // Handle result values, copying them out of physregs into vregs that we
   // return.
   return LowerCallResult(Chain, InGlue, CallConv, isVarArg, Ins, dl, DAG,
-                         InVals, RegMask);
+                         InVals, RegMask, CarryFlagResult);
 }
 
 //===----------------------------------------------------------------------===//

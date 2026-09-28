@@ -78,6 +78,7 @@ set(sources
   X86OptimizeLEAs.cpp
   X86PadShortFunction.cpp
   X86PartialReduction.cpp
+  X86CarryFlagReturn.cpp
   X86RegisterInfo.cpp
   X86ReturnThunks.cpp
   X86SelectionDAGInfo.cpp

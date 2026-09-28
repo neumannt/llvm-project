@@ -1967,8 +1967,11 @@ void ClangToLLVMArgMapping::construct(const ASTContext &Context,
   // arguments, so that it is at the same position in the function definition
   // and at (variadic) call sites.
   unsigned NumRequiredArgs = FI.getNumRequiredArgs();
+  bool HasStaticErrorArg = FI.hasStaticErrorParam() &&
+                           Context.getLangOpts().getStaticExceptionsABI() ==
+                               LangOptions::StaticExceptionsABIKind::Pointer;
   auto AddStaticErrorArg = [&] {
-    if (FI.hasStaticErrorParam() && StaticErrorArgNo == InvalidIndex)
+    if (HasStaticErrorArg && StaticErrorArgNo == InvalidIndex)
       StaticErrorArgNo = IRArgNo++;
   };
 
@@ -2087,12 +2090,9 @@ llvm::FunctionType *CodeGenTypes::GetFunctionType(GlobalDecl GD) {
   return GetFunctionType(FI);
 }
 
-llvm::FunctionType *CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
-
-  bool Inserted = FunctionsBeingProcessed.insert(&FI).second;
-  (void)Inserted;
-  assert(Inserted && "Recursively being processed?");
-
+/// The IR return type of \p FI according to its ABIArgInfo.
+static llvm::Type *getABIReturnType(CodeGenTypes &CGT,
+                                    const CGFunctionInfo &FI) {
   llvm::Type *resultType = nullptr;
   const ABIArgInfo &retAI = FI.getReturnInfo();
   switch (retAI.getKind()) {
@@ -2110,22 +2110,53 @@ llvm::FunctionType *CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
     if (retAI.getInAllocaSRet()) {
       // sret things on win32 aren't void, they return the sret pointer.
       QualType ret = FI.getReturnType();
-      unsigned addressSpace = CGM.getTypes().getTargetAddressSpace(ret);
-      resultType = llvm::PointerType::get(getLLVMContext(), addressSpace);
+      unsigned addressSpace = CGT.getTargetAddressSpace(ret);
+      resultType = llvm::PointerType::get(CGT.getLLVMContext(), addressSpace);
     } else {
-      resultType = llvm::Type::getVoidTy(getLLVMContext());
+      resultType = llvm::Type::getVoidTy(CGT.getLLVMContext());
     }
     break;
 
   case ABIArgInfo::Indirect:
   case ABIArgInfo::Ignore:
-    resultType = llvm::Type::getVoidTy(getLLVMContext());
+    resultType = llvm::Type::getVoidTy(CGT.getLLVMContext());
     break;
 
   case ABIArgInfo::CoerceAndExpand:
     resultType = retAI.getUnpaddedCoerceAndExpandType();
     break;
   }
+  return resultType;
+}
+
+bool CodeGenTypes::returnsStaticErrorInRegisters(
+    const CGFunctionInfo &FI) const {
+  return FI.hasStaticErrorParam() &&
+         Context.getLangOpts().getStaticExceptionsABI() !=
+             LangOptions::StaticExceptionsABIKind::Pointer;
+}
+
+const StaticErrorReturnLayout &
+CodeGenTypes::getStaticErrorReturnLayout(const CGFunctionInfo &FI) {
+  assert(returnsStaticErrorInRegisters(FI));
+  llvm::Type *ValueTy = getABIReturnType(*this, FI);
+  std::unique_ptr<StaticErrorReturnLayout> &Layout =
+      StaticErrorReturnLayouts[ValueTy];
+  if (!Layout)
+    Layout = std::make_unique<StaticErrorReturnLayout>(
+        computeStaticErrorReturnLayout(ValueTy, getDataLayout()));
+  return *Layout;
+}
+
+llvm::FunctionType *CodeGenTypes::GetFunctionType(const CGFunctionInfo &FI) {
+
+  bool Inserted = FunctionsBeingProcessed.insert(&FI).second;
+  (void)Inserted;
+  assert(Inserted && "Recursively being processed?");
+
+  llvm::Type *resultType = returnsStaticErrorInRegisters(FI)
+                               ? getStaticErrorReturnLayout(FI).Type
+                               : getABIReturnType(*this, FI);
 
   ClangToLLVMArgMapping IRFunctionArgs(getContext(), FI, true);
   SmallVector<llvm::Type *, 8> ArgTypes(IRFunctionArgs.totalIRArgs());
@@ -3104,7 +3135,17 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
 
   // The return value of a 'throws' function is unspecified when it fails, so
   // only keep the attributes that describe how the value is passed.
-  if (FI.hasStaticErrorParam()) {
+  // If it returns errors in registers, the IR return value is a struct that
+  // has no attributes.
+  bool StaticErrorInRegisters = getTypes().returnsStaticErrorInRegisters(FI);
+  if (StaticErrorInRegisters) {
+    RetAttrs.clear();
+    // The x86 backend returns the failure flag in the carry flag.
+    if (getLangOpts().getStaticExceptionsABI() ==
+            LangOptions::StaticExceptionsABIKind::Carry &&
+        getTarget().getTriple().isX86())
+      FuncAttrs.addAttribute("x86-carry-flag-return");
+  } else if (FI.hasStaticErrorParam()) {
     for (llvm::Attribute::AttrKind Kind :
          {llvm::Attribute::NoUndef, llvm::Attribute::NonNull,
           llvm::Attribute::NoAlias, llvm::Attribute::Dereferenceable,
@@ -3121,7 +3162,12 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
   // Attach attributes to sret.
   if (IRFunctionArgs.hasSRetArg()) {
     llvm::AttrBuilder &SRETAttrs = ArgAttrs[IRFunctionArgs.getSRetArgNo()];
-    SRETAttrs.addStructRetAttr(getTypes().ConvertTypeForMem(RetTy));
+    // 'sret' requires a void return type; the return registers of a 'throws'
+    // function that returns errors in registers are in use.
+    if (StaticErrorInRegisters)
+      SRETAttrs.addAttribute(llvm::Attribute::NoAlias);
+    else
+      SRETAttrs.addStructRetAttr(getTypes().ConvertTypeForMem(RetTy));
     SRETAttrs.addAttribute(llvm::Attribute::Writable);
     SRETAttrs.addAttribute(llvm::Attribute::DeadOnUnwind);
     hasUsedSRet = true;
@@ -3579,6 +3625,9 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
     llvm::Value *ErrArg = Fn->getArg(IRFunctionArgs.getStaticErrorArgNo());
     ErrArg->setName("static.error");
     StaticErrorOutSlot = makeStaticErrorAddress(ErrArg);
+  } else if (CGM.getTypes().returnsStaticErrorInRegisters(FI)) {
+    // The error is returned in registers; collect it in a local.
+    StaticErrorOutSlot = createStaticErrorSlot("static.error");
   }
 
   // Name the struct return parameter.
@@ -4463,7 +4512,9 @@ void CodeGenFunction::EmitFunctionEpilog(
 
   // Functions with no result always return void.
   if (!ReturnValue.isValid()) {
-    auto *I = Builder.CreateRetVoid();
+    auto *I = CGM.getTypes().returnsStaticErrorInRegisters(FI)
+                  ? Builder.CreateRet(EmitStaticSuccessReturnValue(FI, nullptr))
+                  : Builder.CreateRetVoid();
     if (RetKeyInstructionsSourceAtom)
       addInstToSpecificSourceAtom(I, nullptr, RetKeyInstructionsSourceAtom);
     else
@@ -4645,10 +4696,13 @@ void CodeGenFunction::EmitFunctionEpilog(
         RV = EmitCMSEClearRecord(RV, ITy, RetTy);
     }
     EmitReturnValueCheck(RV);
-    Ret = Builder.CreateRet(RV);
-  } else {
-    Ret = Builder.CreateRetVoid();
   }
+  if (CGM.getTypes().returnsStaticErrorInRegisters(FI))
+    Ret = Builder.CreateRet(EmitStaticSuccessReturnValue(FI, RV));
+  else if (RV)
+    Ret = Builder.CreateRet(RV);
+  else
+    Ret = Builder.CreateRetVoid();
 
   if (RetDbgLoc)
     Ret->setDebugLoc(std::move(RetDbgLoc));
@@ -5753,6 +5807,10 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
   assert(Callee.isOrdinary() || Callee.isVirtual());
 
+  // Whether this is the call in 'return f(...)' of a 'throws' function.
+  bool IsStaticErrorForwardCall =
+      std::exchange(StaticErrorForwardPending, false);
+
   // Handle struct-return functions by passing a pointer to the
   // location that we would like to return into.
   QualType RetTy = CallInfo.getReturnType();
@@ -6263,12 +6321,25 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
   }
 
+  // In 'return f(...)', our caller can receive the result of a 'throws'
+  // function f, success or error, as is; a value returned in memory must go
+  // to our own return slot.
+  if (IsStaticErrorForwardCall)
+    IsStaticErrorForwardCall =
+        !IsMustTail && !IsVirtualFunctionPointerThunk &&
+        canForwardStaticErrorResult(CallInfo, IRFuncTy->getReturnType()) &&
+        (!RetAI.isIndirect() ||
+         (!ReturnValue.isNull() && this->ReturnValue.isValid() &&
+          ReturnValue.getAddress().getBasePointer() ==
+              this->ReturnValue.getBasePointer()));
+
   // Pass a std::error slot to a 'throws' function: the one of the innermost
   // static exception target, so that propagation needs no copying.
   std::optional<StaticErrorTarget> StaticTarget;
   if (IRFunctionArgs.hasStaticErrorArg()) {
     Address ErrSlot = Address::invalid();
-    if (IsMustTail || IsVirtualFunctionPointerThunk) {
+    if (IsMustTail || IsVirtualFunctionPointerThunk ||
+        IsStaticErrorForwardCall) {
       // The error goes directly to our caller.
       if (StaticErrorOutSlot.isValid())
         ErrSlot = StaticErrorOutSlot;
@@ -6285,6 +6356,24 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
     IRCallArgs[IRFunctionArgs.getStaticErrorArgNo()] =
         ErrSlot.emitRawPointer(*this);
+  }
+
+  // A 'throws' function that returns errors in registers: the error is stored
+  // to the target's slot after the call.
+  bool StaticErrorInRegisters =
+      CGM.getTypes().returnsStaticErrorInRegisters(CallInfo);
+  if (StaticErrorInRegisters) {
+    if (IsVirtualFunctionPointerThunk)
+      CGM.ErrorUnsupported(CurFuncDecl, "virtual function pointer thunk for a "
+                                        "'throws' function");
+    else if (IsMustTail) {
+      // The result, and hence the error, goes directly to our caller.
+      if (!isStaticThrowsFunction())
+        CGM.ErrorUnsupported(MustTailCall, "tail call to a 'throws' function "
+                                           "from a function without 'throws'");
+    } else if (!IsStaticErrorForwardCall) {
+      StaticTarget = getStaticErrorTarget();
+    }
   }
 
   const CGCallee &ConcreteCallee = Callee.prepareConcreteCallee(*this);
@@ -6777,9 +6866,23 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   // lexical order, so deactivate it and run it manually here.
   CallArgs.freeArgumentMemory(*this);
 
+  // Return the result of a 'throws' callee as is ('return f(...)').
+  if (IsStaticErrorForwardCall && HaveInsertPoint()) {
+    if (CI->getType()->isVoidTy())
+      Builder.CreateRetVoid();
+    else
+      Builder.CreateRet(CI);
+    Builder.ClearInsertionPoint();
+    EnsureInsertPoint();
+    return GetUndefRValue(RetTy);
+  }
+
   // If a 'throws' callee failed, propagate its static exception. The return
   // value is only extracted on the success path.
-  if (StaticTarget)
+  llvm::Value *CallResult = CI;
+  if (StaticErrorInRegisters && StaticTarget)
+    CallResult = EmitStaticErrorCallResult(CallInfo, CI, *StaticTarget);
+  else if (StaticTarget)
     EmitStaticErrorCheck(*StaticTarget);
 
   // Extract the return value.
@@ -6797,8 +6900,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
         Address addr = SRetPtr.withElementType(coercionType);
 
-        assert(CI->getType() == RetAI.getUnpaddedCoerceAndExpandType());
-        bool requiresExtract = isa<llvm::StructType>(CI->getType());
+        assert(CallResult->getType() == RetAI.getUnpaddedCoerceAndExpandType());
+        bool requiresExtract = isa<llvm::StructType>(CallResult->getType());
 
         unsigned unpaddedIndex = 0;
         for (unsigned i = 0, e = coercionType->getNumElements(); i != e; ++i) {
@@ -6806,7 +6909,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
           if (ABIArgInfo::isPaddingForCoerceAndExpand(eltType))
             continue;
           Address eltAddr = Builder.CreateStructGEP(addr, i);
-          llvm::Value *elt = CI;
+          llvm::Value *elt = CallResult;
           if (requiresExtract)
             elt = Builder.CreateExtractValue(elt, unpaddedIndex++);
           else
@@ -6836,8 +6939,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
             RetAI.getDirectOffset() == 0) {
           switch (getEvaluationKind(RetTy)) {
           case TEK_Complex: {
-            llvm::Value *Real = Builder.CreateExtractValue(CI, 0);
-            llvm::Value *Imag = Builder.CreateExtractValue(CI, 1);
+            llvm::Value *Real = Builder.CreateExtractValue(CallResult, 0);
+            llvm::Value *Imag = Builder.CreateExtractValue(CallResult, 1);
             return RValue::getComplex(std::make_pair(Real, Imag));
           }
           case TEK_Aggregate:
@@ -6845,7 +6948,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
           case TEK_Scalar: {
             // If the argument doesn't match, perform a bitcast to coerce it.
             // This can happen due to trivial type mismatches.
-            llvm::Value *V = CI;
+            llvm::Value *V = CallResult;
             if (V->getType() != RetIRTy)
               V = Builder.CreateBitCast(V, RetIRTy);
             return RValue::get(V);
@@ -6857,7 +6960,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
         // compatibility, and the types match, use the llvm.vector.extract
         // intrinsic to perform the conversion.
         if (auto *FixedDstTy = dyn_cast<llvm::FixedVectorType>(RetIRTy)) {
-          llvm::Value *V = CI;
+          llvm::Value *V = CallResult;
           if (auto *ScalableSrcTy =
                   dyn_cast<llvm::ScalableVectorType>(V->getType())) {
             if (FixedDstTy->getElementType() ==
@@ -6887,7 +6990,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
           // If the value is offset in memory, apply the offset now.
           Address StorePtr = emitAddressAtOffset(*this, DestPtr, RetAI);
           CreateCoercedStore(
-              CI, RetTy, StorePtr,
+              CallResult, RetTy, StorePtr,
               llvm::TypeSize::getFixed(DestSize - RetAI.getDirectOffset()),
               DestIsVolatile);
         }
@@ -6903,8 +7006,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
           DestPtr = CreateMemTempWithoutCast(RetTy, "target_coerce");
           DestIsVolatile = false;
         }
-        CGM.getABIInfo().createCoercedStore(CI, StorePtr, RetAI, DestIsVolatile,
-                                            *this);
+        CGM.getABIInfo().createCoercedStore(CallResult, StorePtr, RetAI,
+                                            DestIsVolatile, *this);
         return convertTempToRValue(DestPtr, RetTy, SourceLocation());
       }
 

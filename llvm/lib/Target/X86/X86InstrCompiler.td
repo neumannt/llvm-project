@@ -31,6 +31,9 @@ let Defs = [ESP, EFLAGS, SSP], Uses = [ESP, SSP], SchedRW = [WriteALU] in {
 def ADJCALLSTACKDOWN32 : I<0, Pseudo, (outs),
                            (ins i32imm:$amt1, i32imm:$amt2, i32imm:$amt3),
                            "#ADJCALLSTACKDOWN", []>, Requires<[NotLP64]>;
+// The post-isel hook removes the EFLAGS definition of an ADJCALLSTACKUP that
+// must preserve the flags defined by the call (see X86::CarryFlagReturnAttr).
+let hasPostISelHook = 1 in
 def ADJCALLSTACKUP32   : I<0, Pseudo, (outs), (ins i32imm:$amt1, i32imm:$amt2),
                            "#ADJCALLSTACKUP",
                            [(X86callseq_end timm:$amt1, timm:$amt2)]>,
@@ -49,6 +52,7 @@ let Defs = [RSP, EFLAGS, SSP], Uses = [RSP, SSP], SchedRW = [WriteALU] in {
 def ADJCALLSTACKDOWN64 : I<0, Pseudo, (outs),
                            (ins i32imm:$amt1, i32imm:$amt2, i32imm:$amt3),
                            "#ADJCALLSTACKDOWN", []>, Requires<[IsLP64]>;
+let hasPostISelHook = 1 in
 def ADJCALLSTACKUP64   : I<0, Pseudo, (outs), (ins i32imm:$amt1, i32imm:$amt2),
                            "#ADJCALLSTACKUP",
                            [(X86callseq_end timm:$amt1, timm:$amt2)]>,

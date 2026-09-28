@@ -755,7 +755,9 @@ public:
 
   /// Whether this is a P0709 'throws' function. Such functions take a hidden
   /// pointer to a caller-provided std::error object, which they fill in (and
-  /// thereby make non-null) to report failure.
+  /// thereby make non-null) to report failure, or with
+  /// -fstatic-exceptions-abi=register/carry return the error in registers
+  /// (see CodeGenTypes::returnsStaticErrorInRegisters).
   bool hasStaticErrorParam() const { return StaticThrows; }
 
   /// getASTCallingConvention() - Return the AST-specified calling

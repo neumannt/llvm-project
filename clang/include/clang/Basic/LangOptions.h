@@ -320,6 +320,16 @@ public:
     BKey
   };
 
+  /// How P0709 'throws' functions report errors (-fstatic-exceptions-abi=).
+  enum class StaticExceptionsABIKind {
+    /// Through a hidden pointer to a caller-provided std::error object.
+    Pointer,
+    /// In the return registers, with the failure flag in another register.
+    Register,
+    /// In the return registers, with the failure flag in the carry flag (x86).
+    Carry,
+  };
+
   enum class ThreadModelKind {
     /// POSIX Threads.
     POSIX,

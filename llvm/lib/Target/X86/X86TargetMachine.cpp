@@ -98,6 +98,7 @@ extern "C" LLVM_C_ABI void LLVMInitializeX86Target() {
   initializeX86LoadValueInjectionRetHardeningLegacyPass(PR);
   initializeX86OptimizeLEAsLegacyPass(PR);
   initializeX86PartialReductionLegacyPass(PR);
+  initializeX86CarryFlagReturnLegacyPass(PR);
   initializeX86ReturnThunksLegacyPass(PR);
   initializeX86DAGToDAGISelLegacyPass(PR);
   initializeX86ArgumentStackSlotLegacyPass(PR);
@@ -509,6 +510,8 @@ bool X86PassConfig::addPreISel() {
   const Triple &TT = TM->getTargetTriple();
   if (TT.isOSWindows() && TT.isX86_32())
     addPass(createX86WinEHStateLegacyPass());
+  if (getOptLevel() != CodeGenOptLevel::None)
+    addPass(createX86CarryFlagReturnLegacyPass());
   return true;
 }
 

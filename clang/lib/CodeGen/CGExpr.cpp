@@ -7347,6 +7347,7 @@ RValue CodeGenFunction::EmitCall(QualType CalleeType,
   }
 
   llvm::CallBase *LocalCallOrInvoke = nullptr;
+  markStaticErrorForwardCall(E);
   RValue Call = EmitCall(FnInfo, Callee, ReturnValue, Args, &LocalCallOrInvoke,
                          E == MustTailCall, E->getExprLoc());
 

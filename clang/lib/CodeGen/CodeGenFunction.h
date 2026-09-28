@@ -465,16 +465,17 @@ public:
       EHScopeStack::stable_end();
 
   /// The std::error out-parameter of the current function if it is
-  /// declared 'throws'.
+  /// declared 'throws'. If the function returns errors in registers, this is
+  /// a local that the error return block reads.
   Address StaticErrorOutSlot = Address::invalid();
 
   /// A std::error temporary that receives static exceptions in functions not
   /// declared 'throws' when there is no local handler.
   Address StaticErrorTempSlot = Address::invalid();
 
-  /// With -fstatic-exceptions-propagation-hook: the block that calls the
-  /// propagation hook and returns; all error exits of a 'throws' function
-  /// branch to it.
+  /// With -fstatic-exceptions-propagation-hook, or if the function returns
+  /// errors in registers: the block that calls the propagation hook and
+  /// returns the error; all error exits of a 'throws' function branch to it.
   llvm::BasicBlock *StaticErrorReturnBlock = nullptr;
   llvm::BasicBlock *getStaticErrorReturnBlock();
 
@@ -705,6 +706,16 @@ public:
   // The CallExpr within the current statement that the musttail attribute
   // applies to.  nullptr if there is no 'musttail' on the current statement.
   const CallExpr *MustTailCall = nullptr;
+
+  /// P0709, errors returned in registers: the call in 'return f(...)' whose
+  /// result, success or error, can be returned as is (see
+  /// canForwardStaticErrorResult), and whether the next call that is emitted
+  /// is that call.
+  const CallExpr *StaticErrorForwardCall = nullptr;
+  bool StaticErrorForwardPending = false;
+  void markStaticErrorForwardCall(const CallExpr *E) {
+    StaticErrorForwardPending = E && E == StaticErrorForwardCall;
+  }
 
   /// Returns true if a function must make progress, which means the
   /// mustprogress attribute can be added.
@@ -3848,6 +3859,23 @@ public:
   /// After a call to a 'throws' function that received \p T.Slot, test for
   /// failure and propagate the static exception.
   void EmitStaticErrorCheck(const StaticErrorTarget &T);
+  /// After a call to a 'throws' function \p FI that returns errors in
+  /// registers (see StaticErrorReturnLayout), test for failure, store the
+  /// error to \p T.Slot and propagate it. Returns the normal IR return value
+  /// (null if it is void).
+  llvm::Value *EmitStaticErrorCallResult(const CGFunctionInfo &FI,
+                                         llvm::Value *Result,
+                                         const StaticErrorTarget &T);
+  /// Whether the result of a call to the 'throws' function \p CalleeInfo
+  /// with IR return type \p CalleeRetTy, success or error, can be returned
+  /// as is from the current 'throws' function.
+  bool canForwardStaticErrorResult(const CGFunctionInfo &CalleeInfo,
+                                   llvm::Type *CalleeRetTy);
+  /// The IR return value of the current 'throws' function \p FI (which
+  /// returns errors in registers) for a successful return of the normal IR
+  /// return value \p RV (null if void).
+  llvm::Value *EmitStaticSuccessReturnValue(const CGFunctionInfo &FI,
+                                            llvm::Value *RV);
   /// Propagate the static exception stored in \p T.Slot to \p T. Leaves no
   /// insertion point.
   void EmitStaticErrorExit(const StaticErrorTarget &T);

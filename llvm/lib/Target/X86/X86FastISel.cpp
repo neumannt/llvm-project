@@ -1182,6 +1182,9 @@ bool X86FastISel::X86SelectRet(const Instruction *I) {
   if (TLI.supportSplitCSR(FuncInfo.MF))
     return false;
 
+  if (F.hasFnAttribute(X86::CarryFlagReturnAttr))
+    return false;
+
   CallingConv::ID CC = F.getCallingConv();
   if (CC != CallingConv::C &&
       CC != CallingConv::Fast &&
@@ -3228,6 +3231,10 @@ bool X86FastISel::fastLowerCall(CallLoweringInfo &CLI) {
   // Call / invoke instructions with NoCfCheck attribute require special
   // handling.
   if (CB && CB->doesNoCfCheck())
+    return false;
+
+  // Results returned in the carry flag are handled by SelectionDAG.
+  if (CB && CB->hasFnAttr(X86::CarryFlagReturnAttr))
     return false;
 
   // Functions with no_caller_saved_registers that need special handling.

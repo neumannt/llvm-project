@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -std=c++20 -triple x86_64-linux-gnu -fstatic-exceptions -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s
+// RUN: %clang_cc1 -std=c++20 -triple x86_64-linux-gnu -fstatic-exceptions -fstatic-exceptions-abi=pointer -fcxx-exceptions -fexceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s
 
 // P0709: the implicit handler of a coroutine calls unhandled_exception(),
 // which expects a current exception. Static exceptions raised in the body

@@ -86,6 +86,13 @@ namespace llvm {
     /// Convert LLVM rounding mode to X86 rounding mode.
     int getRoundingModeX86(unsigned RM);
 
+    /// A function (and its call sites) with this attribute returns its last
+    /// return value, if that is an i1, in the carry flag instead of a
+    /// register. Used by the prototype of C++ P0709 static exceptions, where
+    /// the flag tells whether the return registers hold an error.
+    inline constexpr StringLiteral CarryFlagReturnAttr =
+        "x86-carry-flag-return";
+
   } // end namespace X86
 
   //===--------------------------------------------------------------------===//
@@ -760,12 +767,15 @@ namespace llvm {
       LegalFPImmediates.push_back(Imm);
     }
 
+    void AdjustInstrPostInstrSelection(MachineInstr &MI,
+                                       SDNode *Node) const override;
+
     SDValue LowerCallResult(SDValue Chain, SDValue InGlue,
                             CallingConv::ID CallConv, bool isVarArg,
                             const SmallVectorImpl<ISD::InputArg> &Ins,
                             const SDLoc &dl, SelectionDAG &DAG,
-                            SmallVectorImpl<SDValue> &InVals,
-                            uint32_t *RegMask) const;
+                            SmallVectorImpl<SDValue> &InVals, uint32_t *RegMask,
+                            bool CarryFlagResult = false) const;
     SDValue LowerMemArgument(SDValue Chain, CallingConv::ID CallConv,
                              const SmallVectorImpl<ISD::InputArg> &ArgInfo,
                              const SDLoc &dl, SelectionDAG &DAG,

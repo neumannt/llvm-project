@@ -1,5 +1,5 @@
-// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fstatic-exceptions-propagation-hook -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,HOOK
-// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,NOHOOK
+// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fstatic-exceptions-abi=pointer -fstatic-exceptions-propagation-hook -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,HOOK
+// RUN: %clang_cc1 -triple x86_64-linux-gnu -std=c++17 -fstatic-exceptions -fstatic-exceptions-abi=pointer -emit-llvm -disable-llvm-passes -o - %s | FileCheck %s --check-prefixes=CHECK,NOHOOK
 
 namespace std {
 struct error { const void *domain; long value; };

@@ -210,6 +210,25 @@ static bool addExceptionArgs(const ArgList &Args, types::ID InputType,
                       options::OPT_fno_static_exceptions);
     Args.addOptInFlag(CmdArgs, options::OPT_fstatic_exceptions_propagation_hook,
                       options::OPT_fno_static_exceptions_propagation_hook);
+    if (const Arg *A =
+            Args.getLastArg(options::OPT_fstatic_exceptions_abi_EQ)) {
+      // The carry ABI is an experiment for x86. Epilogues that clobber EFLAGS
+      // (Win64 without frame pointer, zeroing registers) are not supported.
+      const llvm::Triple &T = TC.getTriple();
+      const Arg *ZeroRegs =
+          Args.getLastArg(options::OPT_fzero_call_used_regs_EQ);
+      if (StringRef(A->getValue()) != "carry")
+        A->render(Args, CmdArgs);
+      else if (!T.isX86() || (T.getArch() == llvm::Triple::x86_64 &&
+                              T.isOSWindowsOrUEFI()))
+        TC.getDriver().Diag(diag::err_drv_unsupported_opt_for_target)
+            << A->getAsString(Args) << T.str();
+      else if (ZeroRegs && StringRef(ZeroRegs->getValue()) != "skip")
+        TC.getDriver().Diag(diag::err_drv_argument_not_allowed_with)
+            << A->getAsString(Args) << ZeroRegs->getAsString(Args);
+      else
+        A->render(Args, CmdArgs);
+    }
   }
 
   Args.addOptInFlag(CmdArgs, options::OPT_fassume_nothrow_exception_dtor,

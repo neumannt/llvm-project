@@ -1664,6 +1664,15 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
     }
   }
 
+  // P0709: a 'throws' function can return the result of a 'throws' function
+  // in 'return f(...)', success or error, as is.
+  std::optional<llvm::SaveAndRestore<const CallExpr *>> SaveStaticErrorForward;
+  if (RV && CurFnInfo && CurFnInfo->hasStaticErrorParam()) {
+    if (const auto *CE = dyn_cast<CallExpr>(RV->IgnoreParens());
+        CE && getContext().hasSameUnqualifiedType(CE->getType(), FnRetTy))
+      SaveStaticErrorForward.emplace(StaticErrorForwardCall, CE);
+  }
+
   // FIXME: Clean this up by using an LValue for ReturnTemp,
   // EmitStoreThroughLValue, and EmitAnyExpr.
   // Check if the NRVO candidate was not globalized in OpenMP mode.

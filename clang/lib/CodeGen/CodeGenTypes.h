@@ -50,6 +50,42 @@ class CGRecordLayout;
 class CodeGenModule;
 class RequiredArgs;
 
+/// P0709 'throws' functions with -fstatic-exceptions-abi=register or carry
+/// return a success value or a std::error in registers. Their IR return type
+/// is a struct
+///
+///   { W0, W1, ..., Wn-1, <other parts of the value>..., i1 Failed }
+///
+/// where the words W0..Wn-1 (n >= 2, integers or pointers of pointer size)
+/// hold the integer and pointer parts of the normal IR return value, if any.
+/// On failure, W0 and W1 hold the domain and the value of the std::error
+/// instead, like a union. Floating-point and vector parts of the value keep
+/// their types, and hence their registers. The backend returns the fields in
+/// consecutive return registers of the respective class; with
+/// -fstatic-exceptions-abi=carry, the x86 backend returns the flag in CF.
+struct StaticErrorReturnLayout {
+  /// The IR return type.
+  llvm::StructType *Type = nullptr;
+  /// The normal IR return type of the function (void if there is none).
+  llvm::Type *ValueType = nullptr;
+  /// A scalar part of the value.
+  struct Part {
+    /// The indices of the part in ValueType (empty if ValueType is scalar).
+    llvm::SmallVector<unsigned, 2> Path;
+    llvm::Type *Ty;
+    /// The (first) field of Type that holds the part.
+    unsigned Field;
+    /// The number of words that hold the part, or 0 if the part is not an
+    /// integer or pointer and has a field of its own.
+    unsigned NumWords;
+  };
+  llvm::SmallVector<Part, 4> Parts;
+  unsigned FlagField = 0;
+};
+
+StaticErrorReturnLayout
+computeStaticErrorReturnLayout(llvm::Type *ValueTy, const llvm::DataLayout &DL);
+
 /// This class organizes the cross-module state that is used while lowering
 /// AST types to LLVM types.
 class CodeGenTypes {
@@ -88,6 +124,10 @@ class CodeGenTypes {
   llvm::DenseMap<const Type *, llvm::Type *> TypeCache;
 
   llvm::DenseMap<const Type *, llvm::Type *> RecordsWithOpaqueMemberPointers;
+
+  /// StaticErrorReturnLayouts by the normal IR return type.
+  llvm::DenseMap<llvm::Type *, std::unique_ptr<StaticErrorReturnLayout>>
+      StaticErrorReturnLayouts;
 
   static constexpr unsigned FunctionInfosLog2InitSize = 9;
 
@@ -157,6 +197,15 @@ public:
 
   /// GetFunctionType - Get the LLVM function type for \arg Info.
   llvm::FunctionType *GetFunctionType(const CGFunctionInfo &Info);
+
+  /// Whether \p FI is a P0709 'throws' function that returns errors in
+  /// registers rather than through a hidden pointer argument.
+  bool returnsStaticErrorInRegisters(const CGFunctionInfo &FI) const;
+
+  /// The layout of the return value of a 'throws' function for which
+  /// returnsStaticErrorInRegisters() holds.
+  const StaticErrorReturnLayout &
+  getStaticErrorReturnLayout(const CGFunctionInfo &FI);
 
   llvm::FunctionType *GetFunctionType(GlobalDecl GD);
 
